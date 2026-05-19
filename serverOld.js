@@ -1,6 +1,5 @@
 /**
- * Serveur Socket.IO — Auctav Live Sales
- * VERSION STABLE MOBILE + APACHE + SOCKET.IO v2/v3/v4
+ * Serveur Socket.IO — Auctav Live Sales (FIX CORS + PRODUCTION READY)
  */
 
 const express = require('express');
@@ -18,52 +17,40 @@ const { registerBidderHandler } = require('./handlers/bidderHandler');
 const { registerRoomHandler } = require('./handlers/roomHandler');
 const { registerMessageHandler } = require('./handlers/messageHandler');
 const { registerDisconnectHandler } = require('./handlers/disconnectHandler');
-
-const {
-  registerFollowHandler,
-  getFollowersInRoom
-} = require('./handlers/followHandler');
-
-const {
-  registerScreenHandler,
-  getScreensInRoom
-} = require('./handlers/screenHandler');
+const { registerFollowHandler, getFollowersInRoom } = require('./handlers/followHandler');
+const { registerScreenHandler, getScreensInRoom } = require('./handlers/screenHandler');
 
 // ─────────────────────────────────────────────────────────────
-// EXPRESS
+// CONFIG ORIGINS (IMPORTANT FIX CORS)
+// ─────────────────────────────────────────────────────────────
+
+const ALLOWED_ORIGINS = [
+  "https://www.auctav.com",
+  "https://auctav.com",
+  "http://localhost",
+  "http://127.0.0.1"
+];
+
+// ─────────────────────────────────────────────────────────────
+// EXPRESS APP
 // ─────────────────────────────────────────────────────────────
 
 const app = express();
 const server = http.createServer(app);
 
+// pas nécessaire pour socket.io (on le garde optionnel)
 app.use(express.json());
 
-// ─────────────────────────────────────────────────────────────
-// CORS
-// ─────────────────────────────────────────────────────────────
-
-const ALLOWED_ORIGINS = [
-  'https://www.auctav.com',
-  'https://auctav.com',
-  'https://dev.astucom.com',
-  'http://localhost',
-  'http://127.0.0.1'
-];
-
-// ─────────────────────────────────────────────────────────────
-// HEALTH CHECK
-// ─────────────────────────────────────────────────────────────
-
+// Health check
 app.get('/', (_req, res) => {
   res.json({
     status: 'ok',
-    uptime: process.uptime(),
     rooms: getRoomStats(),
-    memory: process.memoryUsage()
+    uptime: process.uptime()
   });
 });
 
-// Followers debug
+// debug followers
 app.get('/follow/:room', (req, res) => {
   res.json({
     room: req.params.room,
@@ -71,7 +58,7 @@ app.get('/follow/:room', (req, res) => {
   });
 });
 
-// Screens debug
+// debug screens
 app.get('/screen/:room', (req, res) => {
   res.json({
     room: req.params.room,
@@ -80,60 +67,37 @@ app.get('/screen/:room', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// SOCKET.IO
+// SOCKET.IO SERVER (FIX CORS HERE)
 // ─────────────────────────────────────────────────────────────
 
 const io = new Server(server, {
-
-  // IMPORTANT MOBILE / RESEAUX LENTS
-  pingInterval: 25000,
-  pingTimeout: 60000,
-
-  // IMPORTANT GROS PAYLOADS
-  maxHttpBufferSize: 1e8,
-
-  // Compression
-  perMessageDeflate: {
-    threshold: 1024
-  },
-
-  // Compatibilité anciens clients
-  allowEIO3: true,
-
-  // IMPORTANT:
-  // polling + websocket
-  // polling aide énormément réseaux mobile
-  transports: ['polling', 'websocket'],
-
   cors: {
-    origin: function(origin, callback) {
-
-      // autorise requêtes sans origin
-      // apps mobiles / curl / server-to-server
-      if (!origin) {
-        return callback(null, true);
-      }
+    origin: function (origin, callback) {
+      // autorise appels server-to-server (pas de origin)
+      if (!origin) return callback(null, true);
 
       if (ALLOWED_ORIGINS.includes(origin)) {
         return callback(null, true);
       }
 
-      log(`CORS bloqué : ${origin}`);
-
-      return callback(new Error('CORS blocked'));
+      log(`CORS bloqué: ${origin}`);
+      return callback(new Error("Not allowed by CORS"));
     },
-
     methods: ['GET', 'POST'],
     credentials: true
-  }
+  },
+
+  // IMPORTANT: compat client socket.io v2 (EIO=3)
+  allowEIO3: true,
+
+  transports: ['websocket', 'polling']
 });
 
 // ─────────────────────────────────────────────────────────────
-// SOCKET CONNECTION
+// CONNECTION HANDLER
 // ─────────────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
-
   log(`+ Connexion : ${socket.id}`);
 
   socketMeta.set(socket.id, {
@@ -142,34 +106,7 @@ io.on('connection', (socket) => {
     isAdmin: false
   });
 
-  // ───────────────────────────────────────────────────
-  // DEBUG TRANSPORT
-  // ───────────────────────────────────────────────────
-
-  log(`Transport : ${socket.conn.transport.name}`);
-
-  socket.conn.on('upgrade', () => {
-    log(
-        `[UPGRADE] ${socket.id} -> ${socket.conn.transport.name}`
-    );
-  });
-
-  // ───────────────────────────────────────────────────
-  // DEBUG DISCONNECT
-  // ───────────────────────────────────────────────────
-
-  socket.on('disconnect', (reason) => {
-    log(`- Déconnexion: ${socket.id} (${reason})`);
-  });
-
-  socket.on('connect_error', (err) => {
-    log(`Connect error ${socket.id}: ${err.message}`);
-  });
-
-  // ───────────────────────────────────────────────────
-  // HANDLERS
-  // ───────────────────────────────────────────────────
-
+  // handlers
   registerAdminHandler(io, socket);
   registerBidderHandler(io, socket);
   registerRoomHandler(io, socket);
@@ -184,12 +121,8 @@ io.on('connection', (socket) => {
 // ─────────────────────────────────────────────────────────────
 
 server.listen(PORT, () => {
-
-  log(`Socket.IO server démarré sur port ${PORT}`);
-
-  log(`Mode : PRODUCTION`);
-
-  log(`Health : http://localhost:${PORT}/`);
+  log(`Socket.IO server running on port ${PORT}`);
+  log(`http://localhost:${PORT}/`);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -197,19 +130,11 @@ server.listen(PORT, () => {
 // ─────────────────────────────────────────────────────────────
 
 process.on('SIGTERM', () => {
-
-  log('SIGTERM reçu — arrêt propre');
-
-  server.close(() => {
-    process.exit(0);
-  });
+  log('SIGTERM reçu — arrêt serveur');
+  server.close(() => process.exit(0));
 });
 
 process.on('SIGINT', () => {
-
-  log('SIGINT reçu — arrêt propre');
-
-  server.close(() => {
-    process.exit(0);
-  });
+  log('SIGINT reçu — arrêt serveur');
+  server.close(() => process.exit(0));
 });

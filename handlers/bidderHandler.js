@@ -1,6 +1,3 @@
-// ─── Bidder Handler ───────────────────────────────────────────────────────────
-// Événements émis par vente_list.php (participants)
-
 const socketMeta            = require('../store');
 const { log }               = require('../utils/logger');
 const { getAdminOfRoom }    = require('../services/roomService');
@@ -100,9 +97,7 @@ function registerBidderHandler(io, socket) {
   });
 
   /**
-   * Alias de getEncheresList utilisé par switcher_list.php.
    * Quand un bidder se connecte sur une vente de type "list",
-   * il émet 'getEncheres' au lieu de 'getEncheresList'.
    * L'admin (switcher_list.php) reçoit ce sendMsg et répond
    * en privé avec getMsgPrivate({ type: 'numLot', … }).
    */

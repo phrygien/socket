@@ -98,6 +98,23 @@ function registerBidderHandler(io, socket) {
     });
   });
 
+  /*
+  * Get enchers pour switcher_list
+   */
+  socket.on('getEncheres', (data) => {
+    const room = socketMeta.get(socket.id)?.room || data?.room;
+    if (!room) return;
+
+    log(`  [getEnch]  : ${socket.id} → ${room}`);
+
+    io.to(room).emit('sendMsg', {
+      type : 'getEncheres',
+      msg  : data || {},
+      name : socketMeta.get(socket.id)?.pseudo || 'unknown',
+      from : socket.id
+    });
+  });
+
   /**
    * Enchère placée par un bidder.
    * socket.emit('doEncheres', { lot, myEnchere, room })
@@ -133,6 +150,15 @@ function registerBidderHandler(io, socket) {
       from : socket.id
     });
   });
+
+  // quand un bidder se connecte sur une vente "list"
+  socket.on('getEncheres', (data) => {
+    io.to(room).emit('sendMsg', {
+      type : 'getEncheres',
+      ...
+    });
+  });
+
 }
 
 module.exports = { registerBidderHandler };

@@ -1,51 +1,49 @@
-// ─── Bidder Handler ───────────────────────────────────────────────────────────
-// Événements émis par vente_list.php (participants)
+// ─── Screen Handler ───────────────────────────────────────────────────────────
+// Gère la salle "auctav_screen" utilisée par screen.php
+//
+// Flux :
+//   screen.php se connecte en tant que "Screen_<timestamp>" (non-admin)
+//   → joinroom('auctav_screen')
+//   → username(pseudo)
+//   ← on('userList', { admin })
+//       → si admin présent  : affiche #all + envoie getScreen à l'admin
+//       → si admin absent   : cache #all
+//
+//   L'admin répond en broadcast sur la salle :
+//   ← on('sendMsg', { type: 'numLot',      msg: { numLot, nom, pere, mere,
+//                                                  presentateur, infos_suppl,
+//                                                  tva, from, img, prices[] } })
+//   ← on('sendMsg', { type: 'previousLot', msg: { numLot, prices[] } })
+//
+// Côté serveur :
+//   - 'getScreen'   : le Screen demande à l'admin les infos du lot en cours
+//                     → relayé à toute la salle (l'admin écoute et répond)
+//   - 'numLot'      : déjà géré par getMsgRoom dans roomHandler
+//   - 'previousLot' : déjà géré par getMsgRoom dans roomHandler
 
-const socketMeta            = require('../store');
-const { log }               = require('../utils/logger');
-const { getAdminOfRoom }    = require('../services/roomService');
+const socketMeta = require('../store');
+const { log }    = require('../utils/logger');
 
-function registerBidderHandler(io, socket) {
+const SCREEN_ROOM = 'auctav_screen';
+
+function registerScreenHandler(io, socket) {
   /**
-   * Identification du bidder.
-   * socket.emit('username', pseudo)
-   * Répond immédiatement avec l'ID de l'admin de la salle.
+   * Le Screen demande les données du lot courant à l'admin.
+   * Émis juste après réception de userList({ admin }).
+   * socket.emit('getMsgPrivate', { toid: idAdmin, type: 'getScreen', name })
+   * → déjà relayé par messageHandler.
+   *
+   * Ici on gère le cas où 'getScreen' est émis en broadcast à la salle.
    */
-  socket.on('username', (pseudo) => {
+  socket.on('getScreen', (data) => {
     const meta = socketMeta.get(socket.id);
-    if (meta) meta.pseudo = pseudo || 'Bidder';
-    log(`  [username] : ${socket.id} → "${pseudo}"`);
-
-    const room = meta?.room;
-    if (room) {
-      const adminId = getAdminOfRoom(room);
-      socket.emit('userList', { admin: adminId });
-      log(`  [userList→${socket.id}] admin=${adminId || 'none'}`);
-    }
-  });
-
-  /**
-   * Connexion initiale du bidder.
-   * socket.emit('connected', { name, email, room })
-   */
-  socket.on('connected', (data) => {
-    const meta = socketMeta.get(socket.id);
-    if (meta && data) {
-      meta.pseudo = data.name  || meta.pseudo;
-      meta.email  = data.email || '';
-      if (data.room) {
-        socket.join(data.room);
-        meta.room = data.room;
-      }
-    }
-
     const room = meta?.room;
     if (!room) return;
 
-    log(`  [connected]: ${socket.id} "${data?.name}" (${data?.email}) → ${room}`);
+    log(`  [getScreen]: ${socket.id} "${meta?.pseudo}" → ${room}`);
 
     io.to(room).emit('sendMsg', {
-      type : 'connected',
+      type : 'getScreen',
       msg  : data || {},
       name : meta?.pseudo || 'unknown',
       from : socket.id
@@ -53,27 +51,22 @@ function registerBidderHandler(io, socket) {
   });
 
   /**
-   * Reconnexion d'un bidder (changement de device / rechargement).
-   * socket.emit('reconnection', { name, email, room })
+   * Mise à jour du lot affiché à l'écran.
+   * Émis par l'admin via getMsgRoom({ type: 'numLot', … })
+   * → déjà géré par roomHandler.
+   *
+   * Ce handler permet à un client non-admin (ex: régie) d'émettre
+   * directement un 'numLot' sans passer par getMsgRoom.
    */
-  socket.on('reconnection', (data) => {
+  socket.on('numLot', (data) => {
     const meta = socketMeta.get(socket.id);
-    if (meta && data) {
-      meta.pseudo = data.name  || meta.pseudo;
-      meta.email  = data.email || '';
-      if (data.room) {
-        socket.join(data.room);
-        meta.room = data.room;
-      }
-    }
-
     const room = meta?.room;
     if (!room) return;
 
-    log(`  [reconnect]: ${socket.id} "${data?.name}" (${data?.email}) → ${room}`);
+    log(`  [numLot]   : ${socket.id} lot=${data?.numLot} → ${room}`);
 
     io.to(room).emit('sendMsg', {
-      type : 'reconnection',
+      type : 'numLot',
       msg  : data || {},
       name : meta?.pseudo || 'unknown',
       from : socket.id
@@ -81,75 +74,18 @@ function registerBidderHandler(io, socket) {
   });
 
   /**
-   * Demande de la liste des lots (bidder vient de charger la page).
-   * Émis par vente_list.php  : socket.emit('getEncheresList', { room })
-   * Émis par switcher_list.php côté bidder : type reçu 'getEncheres'
+   * Affichage du lot précédent (prix adjugé).
+   * Idem : complément au flux getMsgRoom de roomHandler.
    */
-  socket.on('getEncheresList', (data) => {
-    const room = socketMeta.get(socket.id)?.room || data?.room;
-    if (!room) return;
-
-    log(`  [getList]  : ${socket.id} → ${room}`);
-
-    io.to(room).emit('sendMsg', {
-      type : 'getEncheresList',
-      msg  : data || {},
-      name : socketMeta.get(socket.id)?.pseudo || 'unknown',
-      from : socket.id
-    });
-  });
-
-  /**
-   * Alias de getEncheresList utilisé par switcher_list.php.
-   * Quand un bidder se connecte sur une vente de type "list",
-   * il émet 'getEncheres' au lieu de 'getEncheresList'.
-   * L'admin (switcher_list.php) reçoit ce sendMsg et répond
-   * en privé avec getMsgPrivate({ type: 'numLot', … }).
-   */
-  socket.on('getEncheres', (data) => {
-    const room = socketMeta.get(socket.id)?.room || data?.room;
-    if (!room) return;
-
-    log(`  [getEnch]  : ${socket.id} → ${room}`);
-
-    io.to(room).emit('sendMsg', {
-      type : 'getEncheres',
-      msg  : data || {},
-      name : socketMeta.get(socket.id)?.pseudo || 'unknown',
-      from : socket.id
-    });
-  });
-
-  /**
-   * Enchère placée par un bidder.
-   * socket.emit('doEncheres', { lot, myEnchere, room })
-   */
-  socket.on('doEncheres', (data) => {
-    const meta = socketMeta.get(socket.id);
-    const room = meta?.room || data?.room;
-    if (!room) return;
-
-    log(`  [enchère]  : ${socket.id} lot=${data?.lot} montant=${data?.myEnchere}`);
-
-    io.to(room).emit('sendMsg', {
-      type : 'doEncheres',
-      msg  : data || {},
-      name : meta?.pseudo || 'unknown',
-      from : socket.id
-    });
-  });
-
-  /**
-   * Vérification de présence (heartbeat).
-   * socket.emit('follow', data)
-   */
-  socket.on('follow', (data) => {
+  socket.on('previousLot', (data) => {
     const meta = socketMeta.get(socket.id);
     const room = meta?.room;
     if (!room) return;
 
+    log(`  [prevLot]  : ${socket.id} lot=${data?.numLot} → ${room}`);
+
     io.to(room).emit('sendMsg', {
-      type : 'follow',
+      type : 'previousLot',
       msg  : data || {},
       name : meta?.pseudo || 'unknown',
       from : socket.id
@@ -157,4 +93,22 @@ function registerBidderHandler(io, socket) {
   });
 }
 
-module.exports = { registerBidderHandler };
+/**
+ * Retourne les écrans connectés dans la salle screen.
+ * Utilisé par l'endpoint REST GET /screen/:room
+ */
+function getScreensInRoom(room) {
+  const screens = [];
+  for (const [id, meta] of socketMeta.entries()) {
+    if (meta.room === room && !meta.isAdmin) {
+      screens.push({
+        id,
+        pseudo   : meta.pseudo,
+        isScreen : meta.pseudo?.startsWith('Screen_')
+      });
+    }
+  }
+  return screens;
+}
+
+module.exports = { registerScreenHandler, getScreensInRoom, SCREEN_ROOM };

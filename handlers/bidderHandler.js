@@ -82,7 +82,8 @@ function registerBidderHandler(io, socket) {
 
   /**
    * Demande de la liste des lots (bidder vient de charger la page).
-   * socket.emit('getEncheresList', { room })
+   * Émis par vente_list.php  : socket.emit('getEncheresList', { room })
+   * Émis par switcher_list.php côté bidder : type reçu 'getEncheres'
    */
   socket.on('getEncheresList', (data) => {
     const room = socketMeta.get(socket.id)?.room || data?.room;
@@ -92,6 +93,27 @@ function registerBidderHandler(io, socket) {
 
     io.to(room).emit('sendMsg', {
       type : 'getEncheresList',
+      msg  : data || {},
+      name : socketMeta.get(socket.id)?.pseudo || 'unknown',
+      from : socket.id
+    });
+  });
+
+  /**
+   * Alias de getEncheresList utilisé par switcher_list.php.
+   * Quand un bidder se connecte sur une vente de type "list",
+   * il émet 'getEncheres' au lieu de 'getEncheresList'.
+   * L'admin (switcher_list.php) reçoit ce sendMsg et répond
+   * en privé avec getMsgPrivate({ type: 'numLot', … }).
+   */
+  socket.on('getEncheres', (data) => {
+    const room = socketMeta.get(socket.id)?.room || data?.room;
+    if (!room) return;
+
+    log(`  [getEnch]  : ${socket.id} → ${room}`);
+
+    io.to(room).emit('sendMsg', {
+      type : 'getEncheres',
       msg  : data || {},
       name : socketMeta.get(socket.id)?.pseudo || 'unknown',
       from : socket.id
@@ -133,7 +155,6 @@ function registerBidderHandler(io, socket) {
       from : socket.id
     });
   });
-
 }
 
 module.exports = { registerBidderHandler };

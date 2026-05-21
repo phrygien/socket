@@ -133,7 +133,7 @@ function registerBidderHandler(io, socket) {
       from : socket.id
     });
   });
-
+  
 }
 
 module.exports = { registerBidderHandler };

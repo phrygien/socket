@@ -128,32 +128,6 @@ const io = new Server(server, {
   }
 });
 
-
-// ─────────────────────────────────────────────────────────────
-// DÉCRÉMENT SERVEUR DES TIMERS — 1x par seconde
-//
-// Le switcher.php décrémente ses propres inputs toutes les
-// secondes, mais entre deux resynchros l'état serveur reste
-// figé. Un client qui se reconnecte recevrait alors un timer
-// plus grand que la réalité (source du bug "+temps").
-//
-// Ce setInterval maintient les timers en mémoire serveur
-// synchronisés avec le switcher, sans rien émettre.
-// La resynchro périodique du switcher (listLot) recale
-// automatiquement les deux si un léger écart apparaît.
-// ─────────────────────────────────────────────────────────────
-
-setInterval(() => {
-  const allRooms = getRooms(); // Map room → state
-  allRooms.forEach((state) => {
-    if (!state.started) return;
-    Object.values(state.lots).forEach((lot) => {
-      const t = Number.parseInt(lot.time);
-      if (t > 0) lot.time = t - 1;
-    });
-  });
-}, 1000);
-
 // ─────────────────────────────────────────────────────────────
 // SOCKET CONNECTION
 // ─────────────────────────────────────────────────────────────

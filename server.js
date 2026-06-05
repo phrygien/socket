@@ -11,7 +11,7 @@ const { PORT } = require('./config');
 const socketMeta = require('./store');
 const { log } = require('./utils/logger');
 
-const { getRoomStats, getRooms } = require('./services/roomService');
+const { getRoomStats } = require('./services/roomService');
 
 const { registerAdminHandler } = require('./handlers/adminHandler');
 const { registerBidderHandler } = require('./handlers/bidderHandler');
@@ -127,6 +127,7 @@ const io = new Server(server, {
     credentials: true
   }
 });
+
 
 // ─────────────────────────────────────────────────────────────
 // DÉCRÉMENT SERVEUR DES TIMERS — 1x par seconde

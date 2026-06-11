@@ -1,10 +1,8 @@
-const socketMeta                = require('../store');
-const { log }                   = require('../utils/logger');
-const { getAdminOfRoom }        = require('../services/roomService');
-const { updateSaleEndTimer }    = require('../services/saleEndService');
+const socketMeta            = require('../store');
+const { log }               = require('../utils/logger');
+const { getAdminOfRoom }    = require('../services/roomService');
 
 function registerBidderHandler(io, socket) {
-
   /**
    * Identification du bidder.
    * socket.emit('username', pseudo)
@@ -151,74 +149,6 @@ function registerBidderHandler(io, socket) {
       name : meta?.pseudo || 'unknown',
       from : socket.id
     });
-  });
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // INTERCEPTION sendMsg → mise à jour timer de fin de vente
-  // Capture tous les messages qui transitent via getMsgPrivate (pattern
-  // existant dans vente.php : socket.emit('getMsgPrivate', {toid, type, msg})
-  // ─────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Message privé admin ↔ bidder.
-   * Utilisé par vente.php pour router les messages vers l'admin ou un bidder.
-   * socket.emit('getMsgPrivate', { toid, type, msg, name })
-   *
-   * C'est ici que transitent les numLot et listLot envoyés par l'admin
-   * → on en profite pour mettre à jour le timer de fin de vente.
-   */
-  socket.on('getMsgPrivate', (data) => {
-    if (!data) return;
-
-    const { toid, type, msg, name } = data;
-    const meta = socketMeta.get(socket.id);
-    const room = meta?.room;
-
-    log(`  [getMsgPrv]: from=${socket.id} to=${toid || 'room'} type=${type}`);
-
-    // ── Mise à jour timer de fin de vente ──────────────────────────────────
-
-    // Cas 1 : un seul lot mis à jour (ex: l'admin ouvre/met à jour un lot)
-    if (type === 'numLot' && msg?.time > 0 && room) {
-      log(`  [saleEnd]  : numLot lot=${msg.numLot} time=${msg.time}s room=${room}`);
-      updateSaleEndTimer(io, room, msg.time);
-    }
-
-    // Cas 2 : liste complète des lots envoyée à un bidder qui reconnecte
-    // msg.list est un tableau de lots, chacun avec un champ time
-    if (type === 'listLot' && Array.isArray(msg?.list) && room) {
-      const maxTime = msg.list.reduce((max, lot) => {
-        return (lot?.time > max) ? lot.time : max;
-      }, 0);
-
-      if (maxTime > 0) {
-        log(`  [saleEnd]  : listLot maxTime=${maxTime}s room=${room}`);
-        updateSaleEndTimer(io, room, maxTime);
-      }
-    }
-
-    // ── Routage du message ─────────────────────────────────────────────────
-
-    // Destinataire précis → message privé
-    if (toid) {
-      io.to(toid).emit('sendMsg', {
-        type,
-        msg  : msg  || {},
-        name : name || meta?.pseudo || 'unknown',
-        from : socket.id
-      });
-      return;
-    }
-
-    // Pas de destinataire → broadcast à toute la salle
-    if (room) {
-      io.to(room).emit('sendMsg', {
-        type,
-        msg  : msg  || {},
-        name : name || meta?.pseudo || 'unknown',
-        from : socket.id
-      });
-    }
   });
 }
 

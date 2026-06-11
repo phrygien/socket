@@ -227,7 +227,7 @@ io.on('connection', (socket) => {
 
     if (criticalEvents.includes(event) && args[0]) {
       if (!checkAndRecord(socket.id, event, args[0])) {
-        log(`🚫 Doublon bloqué: ${event} de ${socket.id}`);
+        log(`Doublon bloqué: ${event} de ${socket.id}`);
         return; // Bloque le doublon silencieusement
       }
     }

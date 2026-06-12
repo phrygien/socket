@@ -1,395 +1,406 @@
 const { io } = require("socket.io-client");
 
 const URL = "http://localhost:3005/";
-const ROOM = "auctav-test-250";
+const ROOM = "auctav-test-complete";
 
 const ADMIN = "Admin-Test";
-const CLIENTS = 5; // Nombre de clients simulateurs
+const CLIENTS = 5;
+const TOTAL_LOTS = 10;
 
-console.log("===== TEST COMPLET SOCKET.IO =====");
-console.log("Simulation de ventes_live.php");
-console.log("1 admin +", CLIENTS, "clients simulateurs");
-console.log("Room:", ROOM);
-console.log("===================================\n");
+console.log("=".repeat(70));
+console.log("TEST COMPLET SOCKET.IO - TOUS LES EVENEMENTS");
+console.log("=".repeat(70));
+console.log(`URL: ${URL}`);
+console.log(`Room: ${ROOM}`);
+console.log(`Admin: ${ADMIN}`);
+console.log(`Clients: ${CLIENTS}`);
+console.log(`Lots: ${TOTAL_LOTS}`);
+console.log("=".repeat(70));
+console.log("");
 
 // ============================================
-// STATISTIQUES ET METRICS
+// CONFIGURATION
+// ============================================
+const CONFIG = {
+    miniPrice: 2000,
+    baseTime: 60,
+    incrementPerLot: 5,
+    extraTimeThreshold: 60,
+    extraTimeDuration: 59,
+    maxTime: 3600
+};
+
+// ============================================
+// STATISTIQUES
 // ============================================
 const metrics = {
+    startTime: Date.now(),
+
+    // Messages
     adminMessages: 0,
+    clientMessages: 0,
     hackerMessages: 0,
-    duplicateMessages: 0,
-    invalidTimerAttempts: 0,
-    unauthorizedAttempts: 0,
-    extraTimeDetected: 0,
-    extraTimeCount: 0,
+
+    // Événements
+    listLotReceived: 0,
+    numLotReceived: 0,
+    saleEndedReceived: 0,
+    messageReceived: 0,
+    followReceived: 0,
+
+    // Enchères
     bidsReceived: 0,
     bidsValidated: 0,
     bidsRejected: 0,
-    lotChanges: 0,
+    bidsAfterEnd: 0,
+
+    // Extra Time
+    extraTimeTriggered: 0,
+    extraTimeDetected: 0,
+
+    // Sécurité
+    unauthorizedAttempts: 0,
+    invalidTimerAttempts: 0,
+    duplicateMessages: 0,
+
+    // Connexions
     connectionErrors: 0,
-    messageReceived: {},
-    timersReceived: [],
-    bidsHistory: [],
-    startTime: Date.now()
+    clientsConnected: 0,
+
+    // Stockage
+    timings: [],
+    extraTimeEvents: []
 };
 
 // ============================================
 // FONCTIONS UTILITAIRES
 // ============================================
-function getPrice(number) {
+function getTimestamp() {
+    return new Date().toLocaleTimeString();
+}
+
+function getPrice(price) {
     return new Intl.NumberFormat('fr-FR', {
         style: 'currency',
         currency: 'EUR',
-        minimumFractionDigits: 0,
-        maximumFractionDigits: 0
-    }).format(number);
+        minimumFractionDigits: 0
+    }).format(price);
 }
 
-function getInfosTime(time, extratime) {
-    let text = "";
-    if (extratime === true) text = "ExtraTime ";
-    const heure = Math.floor(time / 3600);
-    const min = Math.floor((time - heure * 3600) / 60);
-    const sec = (time - heure * 3600 - min * 60);
-    if (time < 60) return text + sec + "s";
-    else if (time < 3600) return text + min + "m" + sec + "s";
-    else return text + heure + "h" + min + "m";
+function log(message, type = "INFO") {
+    const icons = {
+        "INFO": "📘", "ADMIN": "👑", "CLIENT": "👤",
+        "HACKER": "💀", "SUCCESS": "✅", "ERROR": "❌",
+        "WARNING": "⚠️", "TEST": "🔧", "SALE": "🏁",
+        "BID": "💰", "EXTRA": "⚡", "CONNECT": "🔌"
+    };
+    console.log(`${icons[type] || "📘"} [${getTimestamp()}] ${message}`);
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ============================================
-// ADMIN SOCKET (Comme le switcher.php)
+// GENERATION DES LOTS
 // ============================================
+function generateLots() {
+    const lots = [];
+    let totalTime = 0;
+
+    for (let i = 1; i <= TOTAL_LOTS; i++) {
+        const time = CONFIG.baseTime + ((i - 1) * CONFIG.incrementPerLot);
+        const price = 1000 * i;
+        totalTime += time;
+
+        lots.push({
+            numLot: i,
+            price: price,
+            time: time,
+            initialTime: time,
+            extratime: false,
+            statut: "",
+            reserveInfo: 0,
+            toid: null
+        });
+    }
+
+    log(`${TOTAL_LOTS} lots generes - Temps total: ${Math.floor(totalTime / 60)}m ${totalTime % 60}s`, "SUCCESS");
+    return lots;
+}
+
+let lots = generateLots();
+
+// ============================================
+// ADMIN SOCKET (switcher.php)
+// ============================================
+log("Creation du socket Admin...", "ADMIN");
 const adminSocket = io(URL, {
     transports: ["websocket"],
     reconnection: false
 });
 
-let currentLot = 1;
-let lots = [];
-
-// Initialisation des lots (comme dans le PHP)
-for (let i = 1; i <= 10; i++) {
-    lots.push({
-        numLot: i,
-        price: 1000 * i,
-        time: 60 + (i * 5),
-        extratime: false,
-        statut: "",
-        reserveInfo: 0,
-        toid: null
-    });
-}
+let saleStarted = false;
+let saleActive = true;
+let currentLotIndex = 0;
 
 adminSocket.on("connect", () => {
-    console.log("[ADMIN] Connecte comme vendeur - ID:", adminSocket.id);
+    log(`Connecte - ID: ${adminSocket.id}`, "ADMIN");
     adminSocket.emit("admin", ADMIN);
     adminSocket.emit("joinroom", ROOM);
 });
 
 adminSocket.on("connect_error", (err) => {
-    console.log("[ADMIN] Erreur connexion:", err.message);
+    log(`Erreur connexion: ${err.message}`, "ERROR");
     metrics.connectionErrors++;
 });
 
 adminSocket.on("error", (data) => {
-    console.log("[ADMIN] Erreur recue:", data);
+    log(`Erreur: ${JSON.stringify(data)}`, "ERROR");
 });
 
-// TEST 1: Envoi de la liste complete des lots (comme listLot)
-setTimeout(() => {
-    if (adminSocket.connected) {
-        console.log("\n[TEST 1] Envoi de la liste des lots (listLot)");
-        const listData = lots.map(lot => ({
-            numLot: lot.numLot,
-            price: lot.price,
-            time: lot.time,
-            extratime: lot.extratime,
-            statut: lot.statut,
-            reserveInfo: lot.reserveInfo
-        }));
-
-        adminSocket.emit("getMsgRoom", {
-            room: ROOM,
-            type: "listLot",
-            msg: { list: listData },
-            name: ADMIN
-        });
-        metrics.adminMessages++;
-        metrics.lotChanges++;
+// Écouter les réponses du serveur
+adminSocket.on("sendMsg", (data) => {
+    if (data.type === "saleEnded") {
+        log(`[SERVEUR] Fin de vente recue`, "SALE");
+        metrics.saleEndedReceived++;
     }
-}, 2000);
-
-// TEST 2: Demarrage du live (START)
-setTimeout(() => {
-    if (adminSocket.connected) {
-        console.log("\n[TEST 2] Demarrage du live - Lot 1");
-        startLot(1);
+    if (data.type === "confirmEnchere") {
+        log(`[SERVEUR] Confirmation enchere lot ${data.msg.lot}: ${data.msg.state ? "ACCEPTEE" : "REFUSEE"}`, data.msg.state ? "SUCCESS" : "WARNING");
     }
-}, 4000);
+});
 
-function startLot(lotNum) {
-    const lot = lots.find(l => l.numLot === lotNum);
-    if (lot) {
-        console.log(`[ADMIN] Lancement du lot ${lotNum} avec ${lot.time} secondes`);
-        adminSocket.emit("getMsgRoom", {
-            room: ROOM,
-            type: "numLot",
-            msg: {
-                numLot: lot.numLot,
-                price: lot.price,
-                time: lot.time,
-                extratime: lot.extratime,
-                statut: lot.statut,
-                reserveInfo: lot.reserveInfo
-            },
-            name: ADMIN
-        });
-        metrics.adminMessages++;
-        metrics.lotChanges++;
-    }
+// Fonctions admin
+function sendListLot() {
+    const listData = lots.map(lot => ({
+        numLot: lot.numLot,
+        price: lot.price,
+        time: lot.time,
+        extratime: lot.extratime,
+        statut: lot.statut,
+        reserveInfo: lot.reserveInfo
+    }));
+
+    log(`Envoi listLot (${TOTAL_LOTS} lots)`, "ADMIN");
+    adminSocket.emit("getMsgRoom", {
+        room: ROOM,
+        type: "listLot",
+        msg: { list: listData, totalLots: TOTAL_LOTS },
+        name: ADMIN
+    });
+    metrics.adminMessages++;
 }
 
-// TEST 3: Enchere normale sur lot 1
-setTimeout(() => {
-    if (adminSocket.connected) {
-        console.log("\n[TEST 3] Simulation d'une enchere sur lot 1");
-        // Simuler qu'un client a fait une enchere
-        const bidAmount = 1500;
-        console.log(`  Enchere de ${getPrice(bidAmount)} sur lot 1`);
+function sendNumLot(lotNum, time, price, extraTime = false, statut = "") {
+    log(`Envoi numLot ${lotNum} - time:${time}s - price:${price}€${extraTime ? ' (EXTRA TIME)' : ''}`, "ADMIN");
+    adminSocket.emit("getMsgRoom", {
+        room: ROOM,
+        type: "numLot",
+        msg: {
+            numLot: lotNum,
+            price: price,
+            time: time,
+            extratime: extraTime,
+            statut: statut,
+            reserveInfo: extraTime ? 1 : 0
+        },
+        name: ADMIN
+    });
+    metrics.adminMessages++;
+}
 
-        adminSocket.emit("getMsgPrivate", {
-            toid: "client_simulated",
-            type: "doEncheres",
-            msg: {
-                myEnchere: bidAmount,
-                lot: 1,
-                email: "test@auctav.com"
-            },
-            name: "ClientTest"
-        });
-        metrics.bidsReceived++;
-    }
-}, 6000);
+function sendMessage(text) {
+    log(`Message public: "${text}"`, "ADMIN");
+    adminSocket.emit("getMsgRoom", {
+        room: ROOM,
+        type: "message",
+        msg: { text: text },
+        name: ADMIN
+    });
+    metrics.adminMessages++;
+}
 
-// TEST 4: Validation d'enchere par admin
-setTimeout(() => {
-    if (adminSocket.connected) {
-        console.log("\n[TEST 4] Admin valide l'enchere sur lot 1");
-        const lot = lots.find(l => l.numLot === 1);
-        if (lot) {
-            lot.price = 1500;
-            adminSocket.emit("getMsgRoom", {
-                room: ROOM,
-                type: "numLot",
-                msg: {
-                    numLot: 1,
-                    price: lot.price,
-                    time: lot.time,
-                    extratime: false,
-                    statut: "",
-                    reserveInfo: 3
-                },
-                name: ADMIN
-            });
-            metrics.adminMessages++;
-            metrics.bidsValidated++;
-        }
-    }
-}, 8000);
+function sendSaleEnded() {
+    log("Envoi fin de vente", "ADMIN");
+    adminSocket.emit("getMsgRoom", {
+        room: ROOM,
+        type: "saleEnded",
+        msg: {
+            message: "Vente terminee",
+            redirectUrl: "/resultats.php",
+            totalLots: TOTAL_LOTS
+        },
+        name: ADMIN
+    });
+    metrics.adminMessages++;
+}
 
-// TEST 5: Extra time sur lot 2
-setTimeout(() => {
-    if (adminSocket.connected) {
-        console.log("\n[TEST 5] Activation Extra Time sur lot 2");
-        const lot = lots.find(l => l.numLot === 2);
-        if (lot) {
-            lot.extratime = true;
-            lot.time = 30;
-            adminSocket.emit("getMsgRoom", {
-                room: ROOM,
-                type: "numLot",
-                msg: {
-                    numLot: 2,
-                    price: lot.price,
-                    time: lot.time,
-                    extratime: true,
-                    statut: "",
-                    reserveInfo: 0
-                },
-                name: ADMIN
-            });
-            metrics.adminMessages++;
-            metrics.extraTimeCount++;
-        }
-    }
-}, 10000);
-
-// TEST 6: Enchere avec extra time
-setTimeout(() => {
-    if (adminSocket.connected) {
-        console.log("\n[TEST 6] Enchere pendant Extra Time sur lot 2");
-        adminSocket.emit("getMsgPrivate", {
-            toid: "client_simulated",
-            type: "doEncheres",
-            msg: {
-                myEnchere: 2500,
-                lot: 2,
-                email: "test2@auctav.com"
-            },
-            name: "ClientTest2"
-        });
-        metrics.bidsReceived++;
-    }
-}, 12000);
-
-// TEST 7: Fin de lot (time=0)
-setTimeout(() => {
-    if (adminSocket.connected) {
-        console.log("\n[TEST 7] Fin du lot 2 (time=0)");
-        adminSocket.emit("getMsgRoom", {
-            room: ROOM,
-            type: "numLot",
-            msg: {
-                numLot: 2,
-                price: 2500,
-                time: 0,
-                extratime: false,
-                statut: "sold",
-                reserveInfo: 3
-            },
-            name: ADMIN
-        });
-        metrics.adminMessages++;
-    }
-}, 14000);
-
-// TEST 8: Lot non vendu (notsold)
-setTimeout(() => {
-    if (adminSocket.connected) {
-        console.log("\n[TEST 8] Lot 3 non vendu (notsold)");
-        adminSocket.emit("getMsgRoom", {
-            room: ROOM,
-            type: "numLot",
-            msg: {
-                numLot: 3,
-                price: 3000,
-                time: 0,
-                extratime: false,
-                statut: "notsold",
-                reserveInfo: 2
-            },
-            name: ADMIN
-        });
-        metrics.adminMessages++;
-    }
-}, 16000);
-
-// TEST 9: Retour sur lot precedent (previousLot)
-setTimeout(() => {
-    if (adminSocket.connected) {
-        console.log("\n[TEST 9] Retour sur lot 1 (previousLot)");
-        const lot = lots.find(l => l.numLot === 1);
-        if (lot) {
-            adminSocket.emit("getMsgRoom", {
-                room: ROOM,
-                type: "previousLot",
-                msg: {
-                    numLot: 1,
-                    price: lot.price,
-                    time: 45,
-                    extratime: false
-                },
-                name: ADMIN
-            });
-            metrics.adminMessages++;
-        }
-    }
-}, 18000);
-
-// TEST 10: Message public dans la salle
-setTimeout(() => {
-    if (adminSocket.connected) {
-        console.log("\n[TEST 10] Envoi d'un message public");
-        adminSocket.emit("getMsgRoom", {
-            room: ROOM,
-            type: "message",
-            msg: { text: "Dernier lot avant la pause !" },
-            name: ADMIN
-        });
-        metrics.adminMessages++;
-    }
-}, 20000);
+function validateBid(lotNum, bidAmount, bidderId, isExtraTime = false) {
+    log(`Validation enchere lot ${lotNum} - ${bidAmount}€${isExtraTime ? ' + EXTRA TIME' : ''}`, "ADMIN");
+    adminSocket.emit("getMsgRoom", {
+        room: ROOM,
+        type: "numLot",
+        msg: {
+            numLot: lotNum,
+            price: bidAmount,
+            time: isExtraTime ? 30 : 0,
+            extratime: isExtraTime,
+            statut: isExtraTime ? "" : "sold",
+            reserveInfo: 3,
+            toid: bidderId
+        },
+        name: ADMIN
+    });
+    metrics.adminMessages++;
+    if (!isExtraTime) metrics.bidsValidated++;
+}
 
 // ============================================
-// SIMULATION DE CLIENTS ENCHERISSEURS
+// CLIENT SIMULATEUR (ventes_live.php)
 // ============================================
-class BidderSimulator {
-    constructor(id, email, name) {
+class AuctionClient {
+    constructor(id, name, email) {
         this.id = id;
-        this.email = email;
         this.name = name;
+        this.email = email;
         this.socket = io(URL, { transports: ["websocket"], reconnection: false });
         this.currentBids = {};
+        this.receivedMessages = [];
+        this.saleEnded = false;
         this.setupListeners();
     }
 
     setupListeners() {
         this.socket.on("connect", () => {
-            console.log(`[BIDDER ${this.id}] Connecte - ${this.name}`);
+            log(`${this.name} connecte`, "CLIENT");
+            metrics.clientsConnected++;
             this.socket.emit("joinroom", ROOM);
             this.socket.emit("username", this.name);
         });
 
         this.socket.on("sendMsg", (data) => {
-            // Simulation de l'affichage comme dans le PHP
+            metrics.clientMessages++;
+
+            // Comptage par type
+            if (data.type === "listLot") {
+                metrics.listLotReceived++;
+                log(`${this.name} a recu listLot (${data.msg.list?.length || 0} lots)`, "CLIENT");
+            }
             if (data.type === "numLot") {
-                console.log(`[BIDDER ${this.id}] Lot ${data.msg.numLot} - temps: ${data.msg.time}s - prix: ${getPrice(data.msg.price)}`);
-                if (data.msg.extratime) {
-                    console.log(`  -> EXTRA TIME active sur lot ${data.msg.numLot}`);
+                metrics.numLotReceived++;
+                const timeLeft = data.msg.time;
+                log(`${this.name} - Lot ${data.msg.numLot} - Temps: ${timeLeft}s - Prix: ${getPrice(data.msg.price)}`, "CLIENT");
+
+                // Détection extra time
+                if (data.msg.extratime === true) {
+                    metrics.extraTimeDetected++;
+                    log(`${this.name} - EXTRA TIME detecte sur lot ${data.msg.numLot}!`, "EXTRA");
+                    metrics.extraTimeEvents.push({
+                        lot: data.msg.numLot,
+                        time: timeLeft,
+                        timestamp: Date.now()
+                    });
                 }
 
-                // Enregistrer l'enchere en cours
-                if (data.msg.toid === this.socket.id) {
-                    this.currentBids[data.msg.numLot] = data.msg.price;
-                    console.log(`[BIDDER ${this.id}] Vous detenez l'enchere sur lot ${data.msg.numLot}`);
+                // Vérifier timer invalide
+                if (timeLeft > CONFIG.maxTime) {
+                    metrics.invalidTimerAttempts++;
+                    log(`${this.name} - Timer invalide recu: ${timeLeft}s`, "WARNING");
                 }
             }
-
+            if (data.type === "message") {
+                metrics.messageReceived++;
+                log(`${this.name} - Message: "${data.msg.text}"`, "CLIENT");
+            }
+            if (data.type === "follow") {
+                metrics.followReceived++;
+            }
+            if (data.type === "saleEnded") {
+                metrics.saleEndedReceived++;
+                this.saleEnded = true;
+                log(`${this.name} - VENTE TERMINEE`, "SALE");
+            }
             if (data.type === "confirmEnchere") {
                 if (data.msg.state) {
-                    console.log(`[BIDDER ${this.id}] Enchere validee sur lot ${data.msg.lot}`);
-                    metrics.bidsValidated++;
+                    log(`${this.name} - Enchere ACCEPTEE lot ${data.msg.lot}`, "SUCCESS");
                 } else {
-                    console.log(`[BIDDER ${this.id}] Enchere refusee sur lot ${data.msg.lot}`);
+                    log(`${this.name} - Enchere REFUSEE lot ${data.msg.lot}`, "WARNING");
                     metrics.bidsRejected++;
                 }
             }
-
             if (data.type === "validEnchere") {
-                console.log(`[BIDDER ${this.id}] ✔ Vous avez remporte le lot ${data.msg.lot} !`);
+                log(`${this.name} - ✔ Lot ${data.msg.lot} REMPORTE!`, "SUCCESS");
+            }
+            if (data.type === "userList") {
+                log(`${this.name} - Admin connecte: ${data.admin || 'aucun'}`, "CLIENT");
             }
         });
 
+        this.socket.on("userList", (data) => {
+            log(`${this.name} - UserList: admin=${data.admin}`, "CLIENT");
+        });
+
+        this.socket.on("adminJoined", (data) => {
+            log(`${this.name} - Admin a rejoint la salle`, "CLIENT");
+        });
+
+        this.socket.on("waitingForAdmin", (data) => {
+            log(`${this.name} - ${data.message}`, "CLIENT");
+        });
+
         this.socket.on("connect_error", (err) => {
-            console.log(`[BIDDER ${this.id}] Erreur:`, err.message);
+            log(`${this.name} - Erreur: ${err.message}`, "ERROR");
             metrics.connectionErrors++;
         });
     }
 
-    placeBid(lot, amount) {
-        console.log(`[BIDDER ${this.id}] Place une enchere de ${getPrice(amount)} sur lot ${lot}`);
+    placeBid(lot, amount, currentTime = null) {
+        if (this.saleEnded) {
+            log(`${this.name} - Impossible d'encherir (vente terminee)`, "WARNING");
+            metrics.bidsAfterEnd++;
+            return;
+        }
+
+        const timeInfo = currentTime !== null ? ` (timer: ${currentTime}s)` : "";
+        log(`${this.name} - ENCHERE ${getPrice(amount)} sur lot ${lot}${timeInfo}`, "BID");
+        metrics.bidsReceived++;
+
+        const msg = {
+            myEnchere: amount,
+            lot: lot,
+            email: this.email
+        };
+
+        if (currentTime !== null) {
+            msg.currentTime = currentTime;
+        }
+
         this.socket.emit("getMsgPrivate", {
             toid: "admin",
             type: "doEncheres",
-            msg: {
-                myEnchere: amount,
-                lot: lot,
-                email: this.email
-            },
+            msg: msg,
             name: this.name
         });
-        metrics.bidsReceived++;
+    }
+
+    sendFollow() {
+        log(`${this.name} - Envoi follow`, "CLIENT");
+        this.socket.emit("getMsgPrivate", {
+            toid: "admin",
+            type: "follow",
+            msg: { statut: true },
+            name: this.name
+        });
+    }
+
+    sendReconnection() {
+        log(`${this.name} - Reconnection simulee`, "CLIENT");
+        this.socket.emit("getMsgPrivate", {
+            toid: "admin",
+            type: "reconnection",
+            msg: { email: this.email, room: ROOM },
+            name: this.name
+        });
     }
 
     disconnect() {
@@ -397,156 +408,341 @@ class BidderSimulator {
     }
 }
 
-// Creer des clients simulateurs
-const bidders = [];
-const bidderEmails = ["alice@auctav.com", "bob@auctav.com", "carol@auctav.com", "david@auctav.com", "emma@auctav.com"];
-const bidderNames = ["Alice Martin", "Bob Dupont", "Carol Bernard", "David Petit", "Emma Rousseau"];
+// ============================================
+// HACKER SOCKET
+// ============================================
+class HackerSocket {
+    constructor() {
+        this.socket = io(URL, { transports: ["websocket"], reconnection: false });
+        this.setupListeners();
+    }
 
-for (let i = 0; i < CLIENTS; i++) {
-    bidders.push(new BidderSimulator(i, bidderEmails[i % bidderEmails.length], bidderNames[i % bidderNames.length]));
+    setupListeners() {
+        this.socket.on("connect", () => {
+            log("Hacker connecte", "HACKER");
+            this.socket.emit("joinroom", ROOM);
+        });
+    }
+
+    attackSendNumLot(lot, time, price) {
+        log(`TENTATIVE HACK: envoi numLot ${lot} (time:${time}s, price:${price}€)`, "HACKER");
+        this.socket.emit("getMsgRoom", {
+            room: ROOM,
+            type: "numLot",
+            msg: { numLot: lot, time: time, price: price },
+            name: "Hacker"
+        });
+        metrics.hackerMessages++;
+        metrics.unauthorizedAttempts++;
+    }
+
+    attackSpam(count, type = "message") {
+        log(`TENTATIVE HACK: spam ${count} messages`, "HACKER");
+        for (let i = 0; i < count; i++) {
+            this.socket.emit("getMsgRoom", {
+                room: ROOM,
+                type: type,
+                msg: { text: `Spam message ${i}` },
+                name: "Spammer"
+            });
+        }
+        metrics.hackerMessages += count;
+    }
+
+    attackInvalidTimer(lot, time) {
+        log(`TENTATIVE HACK: timer invalide ${time}s sur lot ${lot}`, "HACKER");
+        this.socket.emit("getMsgRoom", {
+            room: ROOM,
+            type: "numLot",
+            msg: { numLot: lot, time: time, price: 9999999 },
+            name: "Hacker"
+        });
+        metrics.hackerMessages++;
+        metrics.invalidTimerAttempts++;
+    }
+
+    disconnect() {
+        this.socket.disconnect();
+    }
 }
 
 // ============================================
-// SIMULATION D'ENCHERES DE LA PART DES CLIENTS
+// CREATION DES CLIENTS
 // ============================================
+const clients = [
+    new AuctionClient(0, "Alice Dupont", "alice@auctav.com"),
+    new AuctionClient(1, "Bernard Martin", "bernard@auctav.com"),
+    new AuctionClient(2, "Claire Petit", "claire@auctav.com"),
+    new AuctionClient(3, "David Rousseau", "david@auctav.com"),
+    new AuctionClient(4, "Emma Lefevre", "emma@auctav.com")
+];
 
-setTimeout(() => {
-    console.log("\n[CLIENT SIMULATION] Alice fait une enchere sur lot 4");
-    bidders[0].placeBid(4, 4500);
-}, 11000);
-
-setTimeout(() => {
-    console.log("\n[CLIENT SIMULATION] Bob surenchere sur lot 4");
-    bidders[1].placeBid(4, 5000);
-}, 13000);
-
-setTimeout(() => {
-    console.log("\n[CLIENT SIMULATION] Carol enchere sur lot 5");
-    bidders[2].placeBid(5, 5500);
-}, 15000);
-
-setTimeout(() => {
-    console.log("\n[CLIENT SIMULATION] David enchere sur lot 6 avec extra time");
-    bidders[3].placeBid(6, 6500);
-}, 17000);
+const hacker = new HackerSocket();
 
 // ============================================
-// HACKER SIMULATION (tentative d'attaque)
+// SEQUENCE DE TESTS
 // ============================================
-console.log("\n[HACKER] Creation d'un socket malveillant...");
-const hackerSocket = io(URL, {
-    transports: ["websocket"],
-    reconnection: false
-});
 
-hackerSocket.on("connect", () => {
-    console.log("[HACKER] Connecte - Tentative d'attaque");
-    hackerSocket.emit("joinroom", ROOM);
-});
+async function runTests() {
+    log("\n" + "=".repeat(50), "TEST");
+    log("DEBUT DE LA SEQUENCE DE TESTS", "TEST");
+    log("=".repeat(50), "TEST");
 
-// Tentative de hack: envoyer un numLot sans droits
-setTimeout(() => {
-    console.log("\n[TEST SECURITE] Hacker tente d'envoyer un numLot - Doit etre BLOQUE");
-    hackerSocket.emit("getMsgRoom", {
-        room: ROOM,
-        type: "numLot",
-        msg: { numLot: 99, time: 99999, price: 9999999 },
-        name: "Hacker"
-    });
-    metrics.hackerMessages++;
-}, 9000);
+    // ========================================
+    // TEST 1: Connexion et listLot
+    // ========================================
+    await sleep(2000);
+    log("\n[TEST 1] Envoi listLot", "TEST");
+    sendListLot();
 
-// Tentative de hack: modifier le timer
-setTimeout(() => {
-    console.log("\n[TEST SECURITE] Hacker tente de modifier le timer - Doit etre BLOQUE");
-    hackerSocket.emit("getMsgRoom", {
-        room: ROOM,
-        type: "numLot",
-        msg: { numLot: 1, time: 99999, price: 100 },
-        name: "Hacker"
-    });
-    metrics.hackerMessages++;
-}, 12000);
+    // ========================================
+    // TEST 2: Message public
+    // ========================================
+    await sleep(3000);
+    log("\n[TEST 2] Message public", "TEST");
+    sendMessage("Bienvenue dans la vente aux encheres!");
 
-// ============================================
-// RAPPORT FINAL
-// ============================================
-setTimeout(() => {
+    // ========================================
+    // TEST 3: Follow client
+    // ========================================
+    await sleep(2000);
+    log("\n[TEST 3] Client envoie follow", "TEST");
+    clients[0].sendFollow();
+
+    // ========================================
+    // TEST 4: Reconnection client
+    // ========================================
+    await sleep(2000);
+    log("\n[TEST 4] Reconnection client", "TEST");
+    clients[1].sendReconnection();
+
+    // ========================================
+    // TEST 5: Demarrage vente lot 1
+    // ========================================
+    await sleep(3000);
+    log("\n[TEST 5] Demarrage vente - Lot 1", "TEST");
+    sendNumLot(1, lots[0].time, lots[0].price);
+    saleStarted = true;
+
+    // ========================================
+    // TEST 6: Enchere normale (timer ~8s)
+    // ========================================
+    await sleep(2000);
+    log("\n[TEST 6] Enchere normale (timer ~8s)", "TEST");
+    clients[0].placeBid(1, 5500, 8);
+
+    // ========================================
+    // TEST 7: Validation enchere par admin
+    // ========================================
+    await sleep(2000);
+    log("\n[TEST 7] Validation enchere par admin", "TEST");
+    validateBid(1, 5500, clients[0].socket.id, false);
+
+    // ========================================
+    // TEST 8: Lot 2 avec Extra Time à 1s
+    // ========================================
+    await sleep(3000);
+    log("\n[TEST 8] Lot 2 - Enchere derniere seconde (Extra Time)", "TEST");
+    sendNumLot(2, 60, lots[1].price);
+
+    await sleep(55000); // Attendre 55 secondes (timer à 5s)
+    log("\n[TEST 8b] Enchere sur lot 2 (timer ~5s)", "TEST");
+    clients[1].placeBid(2, 6500, 5);
+
+    await sleep(2000);
+    log("\n[TEST 8c] Validation avec EXTRA TIME", "TEST");
+    validateBid(2, 6500, clients[1].socket.id, true);
+    metrics.extraTimeTriggered++;
+
+    // ========================================
+    // TEST 9: Enchere pendant Extra Time
+    // ========================================
+    await sleep(5000);
+    log("\n[TEST 9] Enchere pendant Extra Time (timer ~25s)", "TEST");
+    clients[2].placeBid(2, 7000, 25);
+
+    await sleep(2000);
+    validateBid(2, 7000, clients[2].socket.id, false);
+
+    // ========================================
+    // TEST 10: Lot 3 - Enchere apres fin
+    // ========================================
+    await sleep(3000);
+    log("\n[TEST 10] Lot 3 - Enchere apres fin (timer 0s)", "TEST");
+    sendNumLot(3, 5, lots[2].price);
+
+    await sleep(6000); // Attendre fin du timer
+    log("[TEST 10b] Tentative enchere apres fin", "TEST");
+    clients[3].placeBid(3, 7500, 0);
+
+    // ========================================
+    // TEST 11: Tests de securite (Hacker)
+    // ========================================
+    await sleep(3000);
+    log("\n[TEST 11] Attaques Hacker", "TEST");
+    hacker.attackSendNumLot(99, 99999, 9999999);
+    hacker.attackInvalidTimer(1, 9999);
+    hacker.attackSpam(15, "message");
+
+    // ========================================
+    // TEST 12: Fin de vente
+    // ========================================
+    await sleep(3000);
+    log("\n[TEST 12] Fin de vente", "TEST");
+    sendSaleEnded();
+
+    // ========================================
+    // TEST 13: Tentative enchere apres fin
+    // ========================================
+    await sleep(2000);
+    log("\n[TEST 13] Tentative enchere apres fin de vente", "TEST");
+    clients[4].placeBid(4, 8000, 30);
+
+    // ========================================
+    // TEST 14: Rejection enchere dupliquee
+    // ========================================
+    await sleep(2000);
+    log("\n[TEST 14] Enchere dupliquee (doit etre ignoree)", "TEST");
+    clients[0].placeBid(1, 5500, 10);
+    clients[0].placeBid(1, 5500, 10);
+
+    // ========================================
+    // RAPPORT FINAL
+    // ========================================
+    await sleep(5000);
+    generateReport();
+}
+
+function generateReport() {
     const duration = (Date.now() - metrics.startTime) / 1000;
 
     console.log("\n");
     console.log("=".repeat(70));
-    console.log("RAPPORT FINAL DU TEST - SIMULATION VENTE LIVE");
+    console.log("RAPPORT FINAL - TEST COMPLET");
     console.log("=".repeat(70));
 
     console.log("\n--- STATISTIQUES GENERALES ---");
-    console.log(`Duree du test: ${duration} secondes`);
-    console.log(`Clients simulateurs: ${CLIENTS}`);
-    console.log(`Messages admin envoyes: ${metrics.adminMessages}`);
-    console.log(`Messages hacker envoyes: ${metrics.hackerMessages}`);
-    console.log(`Changements de lot: ${metrics.lotChanges}`);
-    console.log(`Encheres recues: ${metrics.bidsReceived}`);
-    console.log(`Encheres validees: ${metrics.bidsValidated}`);
-    console.log(`Encheres refusees: ${metrics.bidsRejected}`);
-    console.log(`Extra time actives: ${metrics.extraTimeCount}`);
-    console.log(`Erreurs connexion: ${metrics.connectionErrors}`);
+    console.log(`  Duree: ${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s`);
+    console.log(`  Lots testes: ${TOTAL_LOTS}`);
+    console.log(`  Clients: ${CLIENTS}`);
+    console.log(`  Messages admin: ${metrics.adminMessages}`);
+    console.log(`  Messages clients: ${metrics.clientMessages}`);
+    console.log(`  Messages hacker: ${metrics.hackerMessages}`);
 
-    console.log("\n--- VERIFICATIONS DE SECURITE ---");
+    console.log("\n--- EVENEMENTS RECUS ---");
+    console.log(`  listLot: ${metrics.listLotReceived}`);
+    console.log(`  numLot: ${metrics.numLotReceived}`);
+    console.log(`  message: ${metrics.messageReceived}`);
+    console.log(`  follow: ${metrics.followReceived}`);
+    console.log(`  saleEnded: ${metrics.saleEndedReceived}`);
 
-    let securityIssues = false;
+    console.log("\n--- ENCHERES ---");
+    console.log(`  Recues: ${metrics.bidsReceived}`);
+    console.log(`  Validees: ${metrics.bidsValidated}`);
+    console.log(`  Refusees: ${metrics.bidsRejected}`);
+    console.log(`  Apres fin: ${metrics.bidsAfterEnd}`);
 
-    // Verifier si les attaques ont reussi
-    if (metrics.hackerMessages > 0 && metrics.invalidTimerAttempts === 0) {
-        console.log("✅ Securite OK - Les tentatives de hack ont ete bloquees");
-    } else if (metrics.invalidTimerAttempts > 0) {
-        console.log("❌ PROBLEME CRITIQUE - Des timers invalides ont ete acceptes !");
-        securityIssues = true;
+    console.log("\n--- EXTRA TIME ---");
+    console.log(`  Declenches: ${metrics.extraTimeTriggered}`);
+    console.log(`  Detectes: ${metrics.extraTimeDetected}`);
+    if (metrics.extraTimeEvents.length > 0) {
+        console.log(`  Evenements:`, metrics.extraTimeEvents);
     }
 
-    console.log("\n--- FLUX DES OPERATIONS SIMULEES ---");
-    console.log("1. Admin connecte et envoie listLot");
-    console.log("2. Demarrage lot 1");
-    console.log("3. Enchere sur lot 1 -> validation admin");
-    console.log("4. Extra time sur lot 2");
-    console.log("5. Enchere pendant extra time");
-    console.log("6. Fin lot 2 -> vendu");
-    console.log("7. Lot 3 -> non vendu");
-    console.log("8. Retour lot precedent");
-    console.log("9. Messages publics");
-    console.log("10. Tentatives de hack securite");
+    console.log("\n--- SECURITE ---");
+    console.log(`  Tentatives non autorisees: ${metrics.unauthorizedAttempts}`);
+    console.log(`  Timers invalides: ${metrics.invalidTimerAttempts}`);
+    console.log(`  Messages dupliques: ${metrics.duplicateMessages}`);
+    console.log(`  Erreurs connexion: ${metrics.connectionErrors}`);
 
-    console.log("\n--- RECOMMANDATIONS ---");
+    console.log("\n--- VERDICT ---");
 
-    if (securityIssues) {
-        console.log("1. URGENT: Corriger roomHandler.js pour verifier isAdmin");
-        console.log("2. Ajouter validation des timers (MAX_TIME = 3600)");
-        console.log("3. Ajouter rate limiting anti-spam");
+    let score = 100;
+    const issues = [];
+
+    // Vérifier que les événements de base fonctionnent
+    if (metrics.listLotReceived > 0) {
+        console.log("  ✅ listLot recu");
     } else {
-        console.log("✅ Securite OK - Aucune faille detectee");
+        console.log("  ❌ listLot non recu");
+        score -= 20;
+        issues.push("listLot non recu");
     }
 
-    if (metrics.bidsValidated < metrics.bidsReceived) {
-        console.log("⚠️ Certaines encheres n'ont pas ete validees - Verifier logique admin");
+    if (metrics.numLotReceived > 0) {
+        console.log("  ✅ numLot recu");
+    } else {
+        console.log("  ❌ numLot non recu");
+        score -= 20;
+        issues.push("numLot non recu");
     }
 
-    console.log("\n--- SIMULATION REUSSIE ---");
-    console.log("Le test a simule le comportement complet de ventes_live.php");
-    console.log("Les encheres, extra time, et fins de lots ont ete testes");
+    // Vérifier extra time
+    if (metrics.extraTimeTriggered > 0 && metrics.extraTimeDetected > 0) {
+        console.log("  ✅ Extra Time fonctionnel");
+    } else {
+        console.log("  ⚠️ Extra Time non fonctionnel");
+        score -= 15;
+        issues.push("Extra Time non fonctionnel");
+    }
+
+    // Vérifier sécurité
+    if (metrics.invalidTimerAttempts === 0) {
+        console.log("  ✅ Timers invalides bloques");
+    } else {
+        console.log("  ❌ Timers invalides acceptes!");
+        score -= 30;
+        issues.push("Timers invalides acceptes");
+    }
+
+    // Vérifier fin de vente
+    if (metrics.saleEndedReceived > 0) {
+        console.log("  ✅ Fin de vente detectee");
+    } else {
+        console.log("  ⚠️ Fin de vente non detectee");
+        score -= 10;
+        issues.push("Fin de vente non detectee");
+    }
+
+    // Vérifier encheres apres fin
+    if (metrics.bidsAfterEnd > 0 && metrics.bidsRejected > 0) {
+        console.log("  ✅ Encheres apres fin refusees");
+    } else if (metrics.bidsAfterEnd > 0) {
+        console.log("  ⚠️ Encheres apres fin non refusees");
+        score -= 15;
+        issues.push("Encheres apres fin acceptees");
+    }
+
+    console.log(`\n  SCORE FINAL: ${score}/100`);
+
+    if (issues.length > 0) {
+        console.log("\n--- PROBLEMES DETECTES ---");
+        issues.forEach(issue => console.log(`  - ${issue}`));
+    }
+
+    console.log("\n--- DETAILS DES TIMINGS ---");
+    console.log(`  Debut test: ${new Date(metrics.startTime).toLocaleTimeString()}`);
+    console.log(`  Fin test: ${new Date().toLocaleTimeString()}`);
 
     console.log("\n" + "=".repeat(70));
-    console.log("FIN DU TEST");
+    console.log("FIN DU TEST COMPLET");
     console.log("=".repeat(70));
 
     // Deconnexion
     adminSocket.disconnect();
-    hackerSocket.disconnect();
-    bidders.forEach(b => b.disconnect());
+    hacker.disconnect();
+    clients.forEach(c => c.disconnect());
 
     process.exit(0);
-}, 25000);
+}
 
-// Gestion des erreurs
+// Lancer les tests
+runTests().catch(err => {
+    log(`Erreur: ${err.message}`, "ERROR");
+    process.exit(1);
+});
+
 process.on('uncaughtException', (err) => {
-    console.log('Erreur non capturee:', err.message);
+    log(`Exception non capturee: ${err.message}`, "ERROR");
     process.exit(1);
 });

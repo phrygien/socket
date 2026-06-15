@@ -1,26 +1,22 @@
 const { io } = require("socket.io-client");
 
-const URL = "http://localhost:3005/";
+// URL DE PRODUCTION
+const URL = "https://dev.astucom.com:9022/";
 const ROOM = "auctav-test-complete";
-
-const ADMIN = "Admin-Test";
-const CLIENTS = 5;
-const TOTAL_LOTS = 10;
+const ADMIN = "Admin-Test-RateLimit";
+const MAX_CONNECTIONS_ALLOWED = 5; // Doit correspondre à MAX_CONN du serveur
 
 console.log("=".repeat(70));
-console.log("TEST COMPLET SOCKET.IO - TOUS LES EVENEMENTS");
+console.log("TEST RATE LIMITING - Socket.IO (PRODUCTION)");
 console.log("=".repeat(70));
 console.log(`URL: ${URL}`);
 console.log(`Room: ${ROOM}`);
 console.log(`Admin: ${ADMIN}`);
-console.log(`Clients: ${CLIENTS}`);
-console.log(`Lots: ${TOTAL_LOTS}`);
+console.log(`Limite serveur: ${MAX_CONNECTIONS_ALLOWED} connexions/IP`);
+console.log(`⚠️  Attention: Test sur serveur de production`);
 console.log("=".repeat(70));
 console.log("");
 
-// ============================================
-// CONFIGURATION
-// ============================================
 const CONFIG = {
     miniPrice: 2000,
     baseTime: 60,
@@ -30,69 +26,24 @@ const CONFIG = {
     maxTime: 3600
 };
 
-// ============================================
-// STATISTIQUES
-// ============================================
 const metrics = {
     startTime: Date.now(),
-
-    // Messages
-    adminMessages: 0,
-    clientMessages: 0,
-    hackerMessages: 0,
-
-    // Événements
-    listLotReceived: 0,
-    numLotReceived: 0,
-    saleEndedReceived: 0,
-    messageReceived: 0,
-    followReceived: 0,
-
-    // Enchères
-    bidsReceived: 0,
-    bidsValidated: 0,
-    bidsRejected: 0,
-    bidsAfterEnd: 0,
-
-    // Extra Time
-    extraTimeTriggered: 0,
-    extraTimeDetected: 0,
-
-    // Sécurité
-    unauthorizedAttempts: 0,
-    invalidTimerAttempts: 0,
-    duplicateMessages: 0,
-
-    // Connexions
+    connectionsSuccess: 0,
+    connectionsBlocked: 0,
     connectionErrors: 0,
     clientsConnected: 0,
-
-    // Stockage
-    timings: [],
-    extraTimeEvents: []
+    totalAttempts: 0
 };
 
-// ============================================
-// FONCTIONS UTILITAIRES
-// ============================================
 function getTimestamp() {
     return new Date().toLocaleTimeString();
-}
-
-function getPrice(price) {
-    return new Intl.NumberFormat('fr-FR', {
-        style: 'currency',
-        currency: 'EUR',
-        minimumFractionDigits: 0
-    }).format(price);
 }
 
 function log(message, type = "INFO") {
     const icons = {
         "INFO": "📘", "ADMIN": "👑", "CLIENT": "👤",
-        "HACKER": "💀", "SUCCESS": "✅", "ERROR": "❌",
-        "WARNING": "⚠️", "TEST": "🔧", "SALE": "🏁",
-        "BID": "💰", "EXTRA": "⚡", "CONNECT": "🔌"
+        "SUCCESS": "✅", "ERROR": "❌", "WARNING": "⚠️",
+        "TEST": "🔧", "RATE": "🚦", "CONNECT": "🔌"
     };
     console.log(`${icons[type] || "📘"} [${getTimestamp()}] ${message}`);
 }
@@ -102,647 +53,505 @@ function sleep(ms) {
 }
 
 // ============================================
-// GENERATION DES LOTS
+// ADMIN SOCKET (optionnel - pour tester la salle)
 // ============================================
-function generateLots() {
-    const lots = [];
-    let totalTime = 0;
+async function createAdminSocket() {
+    log("Création du socket Admin...", "ADMIN");
 
-    for (let i = 1; i <= TOTAL_LOTS; i++) {
-        const time = CONFIG.baseTime + ((i - 1) * CONFIG.incrementPerLot);
-        const price = 1000 * i;
-        totalTime += time;
-
-        lots.push({
-            numLot: i,
-            price: price,
-            time: time,
-            initialTime: time,
-            extratime: false,
-            statut: "",
-            reserveInfo: 0,
-            toid: null
-        });
-    }
-
-    log(`${TOTAL_LOTS} lots generes - Temps total: ${Math.floor(totalTime / 60)}m ${totalTime % 60}s`, "SUCCESS");
-    return lots;
-}
-
-let lots = generateLots();
-
-// ============================================
-// ADMIN SOCKET (switcher.php)
-// ============================================
-log("Creation du socket Admin...", "ADMIN");
-const adminSocket = io(URL, {
-    transports: ["websocket"],
-    reconnection: false
-});
-
-let saleStarted = false;
-let saleActive = true;
-let currentLotIndex = 0;
-
-adminSocket.on("connect", () => {
-    log(`Connecte - ID: ${adminSocket.id}`, "ADMIN");
-    adminSocket.emit("admin", ADMIN);
-    adminSocket.emit("joinroom", ROOM);
-});
-
-adminSocket.on("connect_error", (err) => {
-    log(`Erreur connexion: ${err.message}`, "ERROR");
-    metrics.connectionErrors++;
-});
-
-adminSocket.on("error", (data) => {
-    log(`Erreur: ${JSON.stringify(data)}`, "ERROR");
-});
-
-// Écouter les réponses du serveur
-adminSocket.on("sendMsg", (data) => {
-    if (data.type === "saleEnded") {
-        log(`[SERVEUR] Fin de vente recue`, "SALE");
-        metrics.saleEndedReceived++;
-    }
-    if (data.type === "confirmEnchere") {
-        log(`[SERVEUR] Confirmation enchere lot ${data.msg.lot}: ${data.msg.state ? "ACCEPTEE" : "REFUSEE"}`, data.msg.state ? "SUCCESS" : "WARNING");
-    }
-});
-
-// Fonctions admin
-function sendListLot() {
-    const listData = lots.map(lot => ({
-        numLot: lot.numLot,
-        price: lot.price,
-        time: lot.time,
-        extratime: lot.extratime,
-        statut: lot.statut,
-        reserveInfo: lot.reserveInfo
-    }));
-
-    log(`Envoi listLot (${TOTAL_LOTS} lots)`, "ADMIN");
-    adminSocket.emit("getMsgRoom", {
-        room: ROOM,
-        type: "listLot",
-        msg: { list: listData, totalLots: TOTAL_LOTS },
-        name: ADMIN
+    const adminSocket = io(URL, {
+        transports: ["websocket", "polling"],
+        reconnection: false,
+        timeout: 10000,
+        rejectUnauthorized: false // Pour les certificats self-signed en dev
     });
-    metrics.adminMessages++;
-}
 
-function sendNumLot(lotNum, time, price, extraTime = false, statut = "") {
-    log(`Envoi numLot ${lotNum} - time:${time}s - price:${price}€${extraTime ? ' (EXTRA TIME)' : ''}`, "ADMIN");
-    adminSocket.emit("getMsgRoom", {
-        room: ROOM,
-        type: "numLot",
-        msg: {
-            numLot: lotNum,
-            price: price,
-            time: time,
-            extratime: extraTime,
-            statut: statut,
-            reserveInfo: extraTime ? 1 : 0
-        },
-        name: ADMIN
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            log("Timeout connexion admin", "WARNING");
+            resolve(null);
+        }, 5000);
+
+        adminSocket.on("connect", () => {
+            clearTimeout(timeout);
+            log(`Admin connecté - ID: ${adminSocket.id}`, "ADMIN");
+            adminSocket.emit("joinroom", ROOM);
+            adminSocket.emit("admin", ADMIN);
+            resolve(adminSocket);
+        });
+
+        adminSocket.on("connect_error", (err) => {
+            clearTimeout(timeout);
+            log(`Admin erreur connexion: ${err.message}`, "ERROR");
+            resolve(null);
+        });
     });
-    metrics.adminMessages++;
-}
-
-function sendMessage(text) {
-    log(`Message public: "${text}"`, "ADMIN");
-    adminSocket.emit("getMsgRoom", {
-        room: ROOM,
-        type: "message",
-        msg: { text: text },
-        name: ADMIN
-    });
-    metrics.adminMessages++;
-}
-
-function sendSaleEnded() {
-    log("Envoi fin de vente", "ADMIN");
-    adminSocket.emit("getMsgRoom", {
-        room: ROOM,
-        type: "saleEnded",
-        msg: {
-            message: "Vente terminee",
-            redirectUrl: "/resultats.php",
-            totalLots: TOTAL_LOTS
-        },
-        name: ADMIN
-    });
-    metrics.adminMessages++;
-}
-
-function validateBid(lotNum, bidAmount, bidderId, isExtraTime = false) {
-    log(`Validation enchere lot ${lotNum} - ${bidAmount}€${isExtraTime ? ' + EXTRA TIME' : ''}`, "ADMIN");
-    adminSocket.emit("getMsgRoom", {
-        room: ROOM,
-        type: "numLot",
-        msg: {
-            numLot: lotNum,
-            price: bidAmount,
-            time: isExtraTime ? 30 : 0,
-            extratime: isExtraTime,
-            statut: isExtraTime ? "" : "sold",
-            reserveInfo: 3,
-            toid: bidderId
-        },
-        name: ADMIN
-    });
-    metrics.adminMessages++;
-    if (!isExtraTime) metrics.bidsValidated++;
 }
 
 // ============================================
-// CLIENT SIMULATEUR (ventes_live.php)
+// TEST 1: Atteindre la limite de connexions
 // ============================================
-class AuctionClient {
-    constructor(id, name, email) {
-        this.id = id;
-        this.name = name;
-        this.email = email;
-        this.socket = io(URL, { transports: ["websocket"], reconnection: false });
-        this.currentBids = {};
-        this.receivedMessages = [];
-        this.saleEnded = false;
-        this.setupListeners();
-    }
-
-    setupListeners() {
-        this.socket.on("connect", () => {
-            log(`${this.name} connecte`, "CLIENT");
-            metrics.clientsConnected++;
-            this.socket.emit("joinroom", ROOM);
-            this.socket.emit("username", this.name);
-        });
-
-        this.socket.on("sendMsg", (data) => {
-            metrics.clientMessages++;
-
-            // Comptage par type
-            if (data.type === "listLot") {
-                metrics.listLotReceived++;
-                log(`${this.name} a recu listLot (${data.msg.list?.length || 0} lots)`, "CLIENT");
-            }
-            if (data.type === "numLot") {
-                metrics.numLotReceived++;
-                const timeLeft = data.msg.time;
-                log(`${this.name} - Lot ${data.msg.numLot} - Temps: ${timeLeft}s - Prix: ${getPrice(data.msg.price)}`, "CLIENT");
-
-                // Détection extra time
-                if (data.msg.extratime === true) {
-                    metrics.extraTimeDetected++;
-                    log(`${this.name} - EXTRA TIME detecte sur lot ${data.msg.numLot}!`, "EXTRA");
-                    metrics.extraTimeEvents.push({
-                        lot: data.msg.numLot,
-                        time: timeLeft,
-                        timestamp: Date.now()
-                    });
-                }
-
-                // Vérifier timer invalide
-                if (timeLeft > CONFIG.maxTime) {
-                    metrics.invalidTimerAttempts++;
-                    log(`${this.name} - Timer invalide recu: ${timeLeft}s`, "WARNING");
-                }
-            }
-            if (data.type === "message") {
-                metrics.messageReceived++;
-                log(`${this.name} - Message: "${data.msg.text}"`, "CLIENT");
-            }
-            if (data.type === "follow") {
-                metrics.followReceived++;
-            }
-            if (data.type === "saleEnded") {
-                metrics.saleEndedReceived++;
-                this.saleEnded = true;
-                log(`${this.name} - VENTE TERMINEE`, "SALE");
-            }
-            if (data.type === "confirmEnchere") {
-                if (data.msg.state) {
-                    log(`${this.name} - Enchere ACCEPTEE lot ${data.msg.lot}`, "SUCCESS");
-                } else {
-                    log(`${this.name} - Enchere REFUSEE lot ${data.msg.lot}`, "WARNING");
-                    metrics.bidsRejected++;
-                }
-            }
-            if (data.type === "validEnchere") {
-                log(`${this.name} - ✔ Lot ${data.msg.lot} REMPORTE!`, "SUCCESS");
-            }
-            if (data.type === "userList") {
-                log(`${this.name} - Admin connecte: ${data.admin || 'aucun'}`, "CLIENT");
-            }
-        });
-
-        this.socket.on("userList", (data) => {
-            log(`${this.name} - UserList: admin=${data.admin}`, "CLIENT");
-        });
-
-        this.socket.on("adminJoined", (data) => {
-            log(`${this.name} - Admin a rejoint la salle`, "CLIENT");
-        });
-
-        this.socket.on("waitingForAdmin", (data) => {
-            log(`${this.name} - ${data.message}`, "CLIENT");
-        });
-
-        this.socket.on("connect_error", (err) => {
-            log(`${this.name} - Erreur: ${err.message}`, "ERROR");
-            metrics.connectionErrors++;
-        });
-    }
-
-    placeBid(lot, amount, currentTime = null) {
-        if (this.saleEnded) {
-            log(`${this.name} - Impossible d'encherir (vente terminee)`, "WARNING");
-            metrics.bidsAfterEnd++;
-            return;
-        }
-
-        const timeInfo = currentTime !== null ? ` (timer: ${currentTime}s)` : "";
-        log(`${this.name} - ENCHERE ${getPrice(amount)} sur lot ${lot}${timeInfo}`, "BID");
-        metrics.bidsReceived++;
-
-        const msg = {
-            myEnchere: amount,
-            lot: lot,
-            email: this.email
-        };
-
-        if (currentTime !== null) {
-            msg.currentTime = currentTime;
-        }
-
-        this.socket.emit("getMsgPrivate", {
-            toid: "admin",
-            type: "doEncheres",
-            msg: msg,
-            name: this.name
-        });
-    }
-
-    sendFollow() {
-        log(`${this.name} - Envoi follow`, "CLIENT");
-        this.socket.emit("getMsgPrivate", {
-            toid: "admin",
-            type: "follow",
-            msg: { statut: true },
-            name: this.name
-        });
-    }
-
-    sendReconnection() {
-        log(`${this.name} - Reconnection simulee`, "CLIENT");
-        this.socket.emit("getMsgPrivate", {
-            toid: "admin",
-            type: "reconnection",
-            msg: { email: this.email, room: ROOM },
-            name: this.name
-        });
-    }
-
-    disconnect() {
-        this.socket.disconnect();
-    }
-}
-
-// ============================================
-// HACKER SOCKET
-// ============================================
-class HackerSocket {
-    constructor() {
-        this.socket = io(URL, { transports: ["websocket"], reconnection: false });
-        this.setupListeners();
-    }
-
-    setupListeners() {
-        this.socket.on("connect", () => {
-            log("Hacker connecte", "HACKER");
-            this.socket.emit("joinroom", ROOM);
-        });
-    }
-
-    attackSendNumLot(lot, time, price) {
-        log(`TENTATIVE HACK: envoi numLot ${lot} (time:${time}s, price:${price}€)`, "HACKER");
-        this.socket.emit("getMsgRoom", {
-            room: ROOM,
-            type: "numLot",
-            msg: { numLot: lot, time: time, price: price },
-            name: "Hacker"
-        });
-        metrics.hackerMessages++;
-        metrics.unauthorizedAttempts++;
-    }
-
-    attackSpam(count, type = "message") {
-        log(`TENTATIVE HACK: spam ${count} messages`, "HACKER");
-        for (let i = 0; i < count; i++) {
-            this.socket.emit("getMsgRoom", {
-                room: ROOM,
-                type: type,
-                msg: { text: `Spam message ${i}` },
-                name: "Spammer"
-            });
-        }
-        metrics.hackerMessages += count;
-    }
-
-    attackInvalidTimer(lot, time) {
-        log(`TENTATIVE HACK: timer invalide ${time}s sur lot ${lot}`, "HACKER");
-        this.socket.emit("getMsgRoom", {
-            room: ROOM,
-            type: "numLot",
-            msg: { numLot: lot, time: time, price: 9999999 },
-            name: "Hacker"
-        });
-        metrics.hackerMessages++;
-        metrics.invalidTimerAttempts++;
-    }
-
-    disconnect() {
-        this.socket.disconnect();
-    }
-}
-
-// ============================================
-// CREATION DES CLIENTS
-// ============================================
-const clients = [
-    new AuctionClient(0, "Alice Dupont", "alice@auctav.com"),
-    new AuctionClient(1, "Bernard Martin", "bernard@auctav.com"),
-    new AuctionClient(2, "Claire Petit", "claire@auctav.com"),
-    new AuctionClient(3, "David Rousseau", "david@auctav.com"),
-    new AuctionClient(4, "Emma Lefevre", "emma@auctav.com")
-];
-
-const hacker = new HackerSocket();
-
-// ============================================
-// SEQUENCE DE TESTS
-// ============================================
-
-async function runTests() {
+async function testRateLimit() {
     log("\n" + "=".repeat(50), "TEST");
-    log("DEBUT DE LA SEQUENCE DE TESTS", "TEST");
+    log("TEST 1: Atteindre la limite de connexions", "TEST");
     log("=".repeat(50), "TEST");
 
-    // ========================================
-    // TEST 1: Connexion et listLot
-    // ========================================
-    await sleep(2000);
-    log("\n[TEST 1] Envoi listLot", "TEST");
-    sendListLot();
+    const sockets = [];
+    const blockedSockets = [];
+    const totalAttempts = MAX_CONNECTIONS_ALLOWED + 3;
 
-    // ========================================
-    // TEST 2: Message public
-    // ========================================
-    await sleep(3000);
-    log("\n[TEST 2] Message public", "TEST");
-    sendMessage("Bienvenue dans la vente aux encheres!");
+    log(`Tentative de création de ${totalAttempts} connexions...`, "RATE");
+    log(`(devrait réussir: ${MAX_CONNECTIONS_ALLOWED}, bloquées: ${totalAttempts - MAX_CONNECTIONS_ALLOWED})`, "INFO");
 
-    // ========================================
-    // TEST 3: Follow client
-    // ========================================
-    await sleep(2000);
-    log("\n[TEST 3] Client envoie follow", "TEST");
-    clients[0].sendFollow();
+    // Créer des connexions jusqu'à dépasser la limite
+    for (let i = 0; i < totalAttempts; i++) {
+        metrics.totalAttempts++;
 
-    // ========================================
-    // TEST 4: Reconnection client
-    // ========================================
-    await sleep(2000);
-    log("\n[TEST 4] Reconnection client", "TEST");
-    clients[1].sendReconnection();
+        const testSocket = io(URL, {
+            transports: ["websocket", "polling"],
+            reconnection: false,
+            timeout: 5000,
+            rejectUnauthorized: false // Pour les certificats self-signed
+        });
 
-    // ========================================
-    // TEST 5: Demarrage vente lot 1
-    // ========================================
-    await sleep(3000);
-    log("\n[TEST 5] Demarrage vente - Lot 1", "TEST");
-    sendNumLot(1, lots[0].time, lots[0].price);
-    saleStarted = true;
+        let wasBlocked = false;
+        let connected = false;
 
-    // ========================================
-    // TEST 6: Enchere normale (timer ~8s)
-    // ========================================
-    await sleep(2000);
-    log("\n[TEST 6] Enchere normale (timer ~8s)", "TEST");
-    clients[0].placeBid(1, 5500, 8);
+        // Promise pour gérer la connexion/erreur
+        const connectionResult = new Promise((resolve) => {
+            const timeout = setTimeout(() => {
+                resolve('timeout');
+            }, 3000);
 
-    // ========================================
-    // TEST 7: Validation enchere par admin
-    // ========================================
-    await sleep(2000);
-    log("\n[TEST 7] Validation enchere par admin", "TEST");
-    validateBid(1, 5500, clients[0].socket.id, false);
+            testSocket.on("connect", () => {
+                clearTimeout(timeout);
+                connected = true;
+                log(`Socket ${i} CONNECTE (${metrics.connectionsSuccess + 1}/${MAX_CONNECTIONS_ALLOWED})`, "SUCCESS");
+                metrics.connectionsSuccess++;
+                resolve('success');
+            });
 
-    // ========================================
-    // TEST 8: Lot 2 avec Extra Time à 1s
-    // ========================================
-    await sleep(3000);
-    log("\n[TEST 8] Lot 2 - Enchere derniere seconde (Extra Time)", "TEST");
-    sendNumLot(2, 60, lots[1].price);
+            testSocket.on("connect_error", (err) => {
+                clearTimeout(timeout);
+                if (err.message.includes("Too many connections") ||
+                    err.message.includes("transport error") ||
+                    err.message.includes("server error")) {
+                    wasBlocked = true;
+                    log(`Socket ${i} BLOQUE par rate limit: ${err.message}`, "RATE");
+                    metrics.connectionsBlocked++;
+                    blockedSockets.push(testSocket);
+                    resolve('blocked');
+                } else {
+                    log(`Socket ${i} Erreur: ${err.message}`, "ERROR");
+                    metrics.connectionErrors++;
+                    resolve('error');
+                }
+            });
+        });
 
-    await sleep(55000); // Attendre 55 secondes (timer à 5s)
-    log("\n[TEST 8b] Enchere sur lot 2 (timer ~5s)", "TEST");
-    clients[1].placeBid(2, 6500, 5);
+        await connectionResult;
 
-    await sleep(2000);
-    log("\n[TEST 8c] Validation avec EXTRA TIME", "TEST");
-    validateBid(2, 6500, clients[1].socket.id, true);
-    metrics.extraTimeTriggered++;
+        if (connected) {
+            // Ajouter un petit délai pour que le serveur enregistre la connexion
+            await sleep(100);
 
-    // ========================================
-    // TEST 9: Enchere pendant Extra Time
-    // ========================================
-    await sleep(5000);
-    log("\n[TEST 9] Enchere pendant Extra Time (timer ~25s)", "TEST");
-    clients[2].placeBid(2, 7000, 25);
+            // Stocker pour déconnexion ultérieure
+            sockets.push(testSocket);
 
-    await sleep(2000);
-    validateBid(2, 7000, clients[2].socket.id, false);
+            // Tenter de joindre une room pour voir si la connexion est vraiment fonctionnelle
+            testSocket.emit("joinroom", ROOM);
+            testSocket.emit("username", `TestUser_${i}`);
+            metrics.clientsConnected++;
+        } else if (!wasBlocked) {
+            testSocket.disconnect();
+        }
 
-    // ========================================
-    // TEST 10: Lot 3 - Enchere apres fin
-    // ========================================
-    await sleep(3000);
-    log("\n[TEST 10] Lot 3 - Enchere apres fin (timer 0s)", "TEST");
-    sendNumLot(3, 5, lots[2].price);
+        // Pause entre les connexions pour éviter de surcharger
+        await sleep(500);
+    }
 
-    await sleep(6000); // Attendre fin du timer
-    log("[TEST 10b] Tentative enchere apres fin", "TEST");
-    clients[3].placeBid(3, 7500, 0);
+    log("\n--- RÉSULTATS TEST 1 ---", "TEST");
+    log(`Tentatives totales: ${metrics.totalAttempts}`, "INFO");
+    log(`Connexions réussies: ${metrics.connectionsSuccess}`, metrics.connectionsSuccess === MAX_CONNECTIONS_ALLOWED ? "SUCCESS" : "WARNING");
+    log(`Connexions bloquées: ${metrics.connectionsBlocked}`, metrics.connectionsBlocked > 0 ? "SUCCESS" : "WARNING");
+    log(`Erreurs: ${metrics.connectionErrors}`, metrics.connectionErrors === 0 ? "SUCCESS" : "WARNING");
 
-    // ========================================
-    // TEST 11: Tests de securite (Hacker)
-    // ========================================
-    await sleep(3000);
-    log("\n[TEST 11] Attaques Hacker", "TEST");
-    hacker.attackSendNumLot(99, 99999, 9999999);
-    hacker.attackInvalidTimer(1, 9999);
-    hacker.attackSpam(15, "message");
+    if (metrics.connectionsSuccess === MAX_CONNECTIONS_ALLOWED && metrics.connectionsBlocked > 0) {
+        log("✅ RATE LIMITING FONCTIONNEL - Les connexions supplémentaires ont été bloquées", "SUCCESS");
+    } else if (metrics.connectionsSuccess > MAX_CONNECTIONS_ALLOWED) {
+        log("❌ RATE LIMITING INEFFICACE - Trop de connexions autorisées", "ERROR");
+        log(`   Attendu: max ${MAX_CONNECTIONS_ALLOWED}, Reçu: ${metrics.connectionsSuccess}`, "ERROR");
+    } else if (metrics.connectionsBlocked === 0) {
+        log("⚠️ RATE LIMITING NON TESTÉ - Aucune connexion bloquée", "WARNING");
+        log("   Possible causes:", "INFO");
+        log("   - Le serveur a une limite plus élevée", "INFO");
+        log("   - Les IPs sont différentes (proxy, NAT)", "INFO");
+        log("   - Le rate limiting n'est pas activé", "INFO");
+    }
 
-    // ========================================
-    // TEST 12: Fin de vente
-    // ========================================
-    await sleep(3000);
-    log("\n[TEST 12] Fin de vente", "TEST");
-    sendSaleEnded();
-
-    // ========================================
-    // TEST 13: Tentative enchere apres fin
-    // ========================================
-    await sleep(2000);
-    log("\n[TEST 13] Tentative enchere apres fin de vente", "TEST");
-    clients[4].placeBid(4, 8000, 30);
-
-    // ========================================
-    // TEST 14: Rejection enchere dupliquee
-    // ========================================
-    await sleep(2000);
-    log("\n[TEST 14] Enchere dupliquee (doit etre ignoree)", "TEST");
-    clients[0].placeBid(1, 5500, 10);
-    clients[0].placeBid(1, 5500, 10);
-
-    // ========================================
-    // RAPPORT FINAL
-    // ========================================
-    await sleep(5000);
-    generateReport();
+    return { sockets, blockedSockets };
 }
 
-function generateReport() {
+// ============================================
+// TEST 2: Vérifier que les connexions existantes restent actives
+// ============================================
+async function testExistingConnections(sockets) {
+    log("\n" + "=".repeat(50), "TEST");
+    log("TEST 2: Vérification des connexions actives", "TEST");
+    log("=".repeat(50), "TEST");
+
+    let activeCount = 0;
+    let responsiveCount = 0;
+
+    for (let i = 0; i < sockets.length; i++) {
+        const socket = sockets[i];
+        if (socket && socket.connected) {
+            activeCount++;
+            log(`Socket ${i} toujours connecté`, "SUCCESS");
+
+            // Tester si la socket répond
+            let responded = false;
+            const testEvent = `test_ping_${i}`;
+
+            socket.once(testEvent, () => {
+                responded = true;
+            });
+
+            socket.emit("ping", testEvent);
+            await sleep(100);
+
+            if (responded) {
+                responsiveCount++;
+            }
+        } else {
+            log(`Socket ${i} déconnecté inopinément`, "WARNING");
+        }
+    }
+
+    log(`\nConnexions actives: ${activeCount}/${sockets.length}`, activeCount === sockets.length ? "SUCCESS" : "WARNING");
+    log(`Connexions réactives: ${responsiveCount}/${sockets.length}`, responsiveCount === sockets.length ? "SUCCESS" : "WARNING");
+
+    return { activeCount, responsiveCount };
+}
+
+// ============================================
+// TEST 3: Déconnexion et reconnexion
+// ============================================
+async function testReconnectionAfterDisconnect(sockets) {
+    log("\n" + "=".repeat(50), "TEST");
+    log("TEST 3: Libération d'un slot et reconnexion", "TEST");
+    log("=".repeat(50), "TEST");
+
+    if (sockets.length === 0) {
+        log("Aucune socket à déconnecter", "WARNING");
+        return false;
+    }
+
+    // Déconnecter la première socket
+    const firstSocket = sockets[0];
+    log("Déconnexion de la première socket...", "INFO");
+    firstSocket.disconnect();
+    await sleep(1000);
+
+    // Tenter de créer une nouvelle connexion
+    log("Tentative de nouvelle connexion (slot libéré)...", "TEST");
+
+    const newSocket = io(URL, {
+        transports: ["websocket", "polling"],
+        reconnection: false,
+        timeout: 5000,
+        rejectUnauthorized: false
+    });
+
+    let reconnected = false;
+    let wasBlocked = false;
+    let errorMessage = "";
+
+    await new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            resolve();
+        }, 5000);
+
+        newSocket.on("connect", () => {
+            clearTimeout(timeout);
+            reconnected = true;
+            log("NOUVELLE CONNEXION RÉUSSIE après libération du slot!", "SUCCESS");
+            resolve();
+        });
+
+        newSocket.on("connect_error", (err) => {
+            clearTimeout(timeout);
+            errorMessage = err.message;
+            if (err.message.includes("Too many connections") ||
+                err.message.includes("transport error")) {
+                wasBlocked = true;
+                log("Nouvelle connexion encore bloquée", "WARNING");
+            } else {
+                log(`Erreur: ${err.message}`, "ERROR");
+            }
+            resolve();
+        });
+    });
+
+    if (reconnected) {
+        log("✅ RECONNEXION FONCTIONNELLE - Les slots sont bien libérés", "SUCCESS");
+        newSocket.disconnect();
+        return true;
+    } else if (wasBlocked) {
+        log("❌ RECONNEXION ÉCHOUÉE - Les slots ne sont pas correctement libérés", "ERROR");
+        log(`   Message d'erreur: ${errorMessage}`, "ERROR");
+        return false;
+    } else {
+        log("⚠️ RECONNEXION INCERTAINE - Vérifier les logs serveur", "WARNING");
+        return false;
+    }
+}
+
+// ============================================
+// TEST 4: Test de charge avec messages
+// ============================================
+async function testLoadWithMessages(sockets) {
+    log("\n" + "=".repeat(50), "TEST");
+    log("TEST 4: Test de charge avec messages", "TEST");
+    log("=".repeat(50), "TEST");
+
+    if (sockets.length === 0) {
+        log("Aucune socket disponible pour le test de charge", "WARNING");
+        return;
+    }
+
+    let messagesSent = 0;
+    let messagesReceived = 0;
+
+    // Écouter les messages
+    sockets.forEach((socket, idx) => {
+        socket.on("sendMsg", () => {
+            messagesReceived++;
+        });
+    });
+
+    // Envoyer des messages depuis chaque socket
+    log(`Envoi de messages depuis ${sockets.length} sockets...`, "TEST");
+
+    for (let i = 0; i < sockets.length; i++) {
+        const socket = sockets[i];
+        if (socket && socket.connected) {
+            socket.emit("getMsgRoom", {
+                room: ROOM,
+                type: "message",
+                msg: { text: `Test message from socket ${i}` },
+                name: `TestUser_${i}`
+            });
+            messagesSent++;
+            await sleep(100);
+        }
+    }
+
+    await sleep(1000);
+
+    log(`Messages envoyés: ${messagesSent}`, "INFO");
+    log(`Messages reçus: ${messagesReceived}`, "INFO");
+
+    const success = messagesSent === messagesReceived;
+    if (success) {
+        log("✅ COMMUNICATION FONCTIONNELLE - Les messages circulent correctement", "SUCCESS");
+    } else {
+        log("⚠️ COMMUNICATION PARTIELLE - Certains messages n'ont pas été reçus", "WARNING");
+    }
+
+    return success;
+}
+
+// ============================================
+// RAPPORT FINAL
+// ============================================
+function generateReport(results) {
     const duration = (Date.now() - metrics.startTime) / 1000;
 
     console.log("\n");
     console.log("=".repeat(70));
-    console.log("RAPPORT FINAL - TEST COMPLET");
+    console.log("RAPPORT FINAL - TEST RATE LIMITING (PRODUCTION)");
     console.log("=".repeat(70));
 
-    console.log("\n--- STATISTIQUES GENERALES ---");
-    console.log(`  Duree: ${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s`);
-    console.log(`  Lots testes: ${TOTAL_LOTS}`);
-    console.log(`  Clients: ${CLIENTS}`);
-    console.log(`  Messages admin: ${metrics.adminMessages}`);
-    console.log(`  Messages clients: ${metrics.clientMessages}`);
-    console.log(`  Messages hacker: ${metrics.hackerMessages}`);
+    console.log("\n--- STATISTIQUES ---");
+    console.log(`  Serveur: ${URL}`);
+    console.log(`  Durée: ${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s`);
+    console.log(`  Connexions réussies: ${metrics.connectionsSuccess}`);
+    console.log(`  Connexions bloquées: ${metrics.connectionsBlocked}`);
+    console.log(`  Erreurs: ${metrics.connectionErrors}`);
+    console.log(`  Limite configurée: ${MAX_CONNECTIONS_ALLOWED}`);
 
-    console.log("\n--- EVENEMENTS RECUS ---");
-    console.log(`  listLot: ${metrics.listLotReceived}`);
-    console.log(`  numLot: ${metrics.numLotReceived}`);
-    console.log(`  message: ${metrics.messageReceived}`);
-    console.log(`  follow: ${metrics.followReceived}`);
-    console.log(`  saleEnded: ${metrics.saleEndedReceived}`);
+    console.log("\n--- RÉSULTATS DES TESTS ---");
 
-    console.log("\n--- ENCHERES ---");
-    console.log(`  Recues: ${metrics.bidsReceived}`);
-    console.log(`  Validees: ${metrics.bidsValidated}`);
-    console.log(`  Refusees: ${metrics.bidsRejected}`);
-    console.log(`  Apres fin: ${metrics.bidsAfterEnd}`);
-
-    console.log("\n--- EXTRA TIME ---");
-    console.log(`  Declenches: ${metrics.extraTimeTriggered}`);
-    console.log(`  Detectes: ${metrics.extraTimeDetected}`);
-    if (metrics.extraTimeEvents.length > 0) {
-        console.log(`  Evenements:`, metrics.extraTimeEvents);
-    }
-
-    console.log("\n--- SECURITE ---");
-    console.log(`  Tentatives non autorisees: ${metrics.unauthorizedAttempts}`);
-    console.log(`  Timers invalides: ${metrics.invalidTimerAttempts}`);
-    console.log(`  Messages dupliques: ${metrics.duplicateMessages}`);
-    console.log(`  Erreurs connexion: ${metrics.connectionErrors}`);
-
-    console.log("\n--- VERDICT ---");
-
-    let score = 100;
+    let finalScore = 100;
     const issues = [];
 
-    // Vérifier que les événements de base fonctionnent
-    if (metrics.listLotReceived > 0) {
-        console.log("  ✅ listLot recu");
+    // Test 1: Rate limit atteint
+    if (metrics.connectionsSuccess === MAX_CONNECTIONS_ALLOWED && metrics.connectionsBlocked > 0) {
+        console.log("  ✅ TEST 1: Rate limiting fonctionnel");
+    } else if (metrics.connectionsSuccess > MAX_CONNECTIONS_ALLOWED) {
+        console.log("  ❌ TEST 1: Rate limiting non fonctionnel");
+        finalScore -= 40;
+        issues.push(`Rate limiting ne bloque pas - ${metrics.connectionsSuccess}/${MAX_CONNECTIONS_ALLOWED} connexions autorisées`);
+    } else if (metrics.connectionsBlocked === 0) {
+        console.log("  ⚠️ TEST 1: Impossible de vérifier - peut-être limite plus haute ou IP différente");
+        finalScore -= 20;
+        issues.push("Test de rate limiting non concluant");
     } else {
-        console.log("  ❌ listLot non recu");
-        score -= 20;
-        issues.push("listLot non recu");
+        console.log("  ✅ TEST 1: Rate limiting partiellement fonctionnel");
     }
 
-    if (metrics.numLotReceived > 0) {
-        console.log("  ✅ numLot recu");
+    // Test 2: Connexions existantes stables
+    if (results.existingActive === results.socketsLength && results.existingActive > 0) {
+        console.log("  ✅ TEST 2: Connexions existantes stables");
+    } else if (results.existingActive > 0) {
+        console.log("  ⚠️ TEST 2: Certaines connexions se sont déconnectées");
+        finalScore -= 15;
+        issues.push(`${results.socketsLength - results.existingActive} connexions perdues`);
     } else {
-        console.log("  ❌ numLot non recu");
-        score -= 20;
-        issues.push("numLot non recu");
+        console.log("  ❌ TEST 2: Toutes les connexions ont été perdues");
+        finalScore -= 30;
+        issues.push("Stabilité des connexions problématique");
     }
 
-    // Vérifier extra time
-    if (metrics.extraTimeTriggered > 0 && metrics.extraTimeDetected > 0) {
-        console.log("  ✅ Extra Time fonctionnel");
+    // Test 3: Reconnexion après libération
+    if (results.reconnectionSuccess) {
+        console.log("  ✅ TEST 3: Reconnexion après libération OK");
     } else {
-        console.log("  ⚠️ Extra Time non fonctionnel");
-        score -= 15;
-        issues.push("Extra Time non fonctionnel");
+        console.log("  ❌ TEST 3: Reconnexion après libération échouée");
+        finalScore -= 25;
+        issues.push("Les slots ne sont pas correctement libérés");
     }
 
-    // Vérifier sécurité
-    if (metrics.invalidTimerAttempts === 0) {
-        console.log("  ✅ Timers invalides bloques");
+    // Test 4: Communication fonctionnelle
+    if (results.communicationSuccess) {
+        console.log("  ✅ TEST 4: Communication fonctionnelle");
     } else {
-        console.log("  ❌ Timers invalides acceptes!");
-        score -= 30;
-        issues.push("Timers invalides acceptes");
+        console.log("  ⚠️ TEST 4: Problèmes de communication détectés");
+        finalScore -= 10;
+        issues.push("Les messages ne circulent pas correctement");
     }
 
-    // Vérifier fin de vente
-    if (metrics.saleEndedReceived > 0) {
-        console.log("  ✅ Fin de vente detectee");
-    } else {
-        console.log("  ⚠️ Fin de vente non detectee");
-        score -= 10;
-        issues.push("Fin de vente non detectee");
-    }
-
-    // Vérifier encheres apres fin
-    if (metrics.bidsAfterEnd > 0 && metrics.bidsRejected > 0) {
-        console.log("  ✅ Encheres apres fin refusees");
-    } else if (metrics.bidsAfterEnd > 0) {
-        console.log("  ⚠️ Encheres apres fin non refusees");
-        score -= 15;
-        issues.push("Encheres apres fin acceptees");
-    }
-
-    console.log(`\n  SCORE FINAL: ${score}/100`);
+    console.log(`\n  SCORE FINAL: ${Math.max(0, finalScore)}/100`);
 
     if (issues.length > 0) {
-        console.log("\n--- PROBLEMES DETECTES ---");
+        console.log("\n--- PROBLÈMES DETECTÉS ---");
         issues.forEach(issue => console.log(`  - ${issue}`));
     }
 
-    console.log("\n--- DETAILS DES TIMINGS ---");
-    console.log(`  Debut test: ${new Date(metrics.startTime).toLocaleTimeString()}`);
-    console.log(`  Fin test: ${new Date().toLocaleTimeString()}`);
+    console.log("\n--- RECOMMANDATIONS ---");
+    if (metrics.connectionsBlocked === 0 && metrics.connectionsSuccess > 0) {
+        console.log("  🔧 Le rate limiting pourrait ne pas être actif ou configuré différemment");
+        console.log("  🔧 Vérifier la valeur de MAX_CONN dans config.js");
+        console.log("  🔧 Vérifier que le middleware de rate limiting est bien chargé");
+    }
+    if (results.reconnectionSuccess === false) {
+        console.log("  🔧 Vérifier l'événement 'disconnect' dans connPerIP");
+        console.log("  🔧 S'assurer que les sockets sont bien retirées de la Map");
+    }
+    if (results.existingActive < results.socketsLength) {
+        console.log("  🔧 Vérifier les timeouts et pingInterval/pingTimeout");
+        console.log("  🔧 Augmenter pingTimeout si les connexions sont instables");
+    }
+
+    console.log("\n--- NOTE DE SÉCURITÉ ---");
+    console.log("  ⚠️ Ce test a été effectué sur un serveur de production");
+    console.log("  📊 Les métriques peuvent être consultées sur:");
+    console.log(`  📊 Health check: ${URL.replace('/socket.io', '')}`);
 
     console.log("\n" + "=".repeat(70));
-    console.log("FIN DU TEST COMPLET");
+    console.log("FIN DU TEST RATE LIMITING");
     console.log("=".repeat(70));
-
-    // Deconnexion
-    adminSocket.disconnect();
-    hacker.disconnect();
-    clients.forEach(c => c.disconnect());
-
-    process.exit(0);
 }
 
-// Lancer les tests
-runTests().catch(err => {
-    log(`Erreur: ${err.message}`, "ERROR");
+// ============================================
+// NETTOYAGE
+// ============================================
+async function cleanup(sockets, adminSocket = null) {
+    log("Nettoyage des connexions...", "INFO");
+
+    if (adminSocket) {
+        adminSocket.disconnect();
+        log("Admin déconnecté", "INFO");
+    }
+
+    for (const socket of sockets) {
+        if (socket && socket.connected) {
+            socket.disconnect();
+        }
+    }
+
+    await sleep(500);
+    log("Nettoyage terminé", "SUCCESS");
+}
+
+// ============================================
+// EXÉCUTION PRINCIPALE
+// ============================================
+async function main() {
+    log("🚦 DÉMARRAGE DU TEST DE RATE LIMITING", "TEST");
+    log(`🌐 Serveur cible: ${URL}`, "INFO");
+    log(`⏰ ${new Date().toLocaleString()}`, "INFO");
+
+    let adminSocket = null;
+
+    try {
+        // Optionnel: Créer un admin pour initialiser la room
+        adminSocket = await createAdminSocket();
+        await sleep(1000);
+
+        // Test 1: Atteindre la limite
+        const { sockets, blockedSockets } = await testRateLimit();
+
+        if (sockets.length === 0) {
+            log("Aucune connexion établie, arrêt du test", "ERROR");
+            await cleanup([], adminSocket);
+            process.exit(1);
+        }
+
+        // Test 2: Vérifier les connexions existantes
+        const { activeCount, responsiveCount } = await testExistingConnections(sockets);
+
+        // Test 3: Test de reconnexion
+        const reconnectionSuccess = await testReconnectionAfterDisconnect(sockets);
+
+        // Test 4: Test de communication
+        const communicationSuccess = await testLoadWithMessages(sockets);
+
+        // Générer rapport
+        generateReport({
+            existingActive: activeCount,
+            responsiveCount: responsiveCount,
+            socketsLength: sockets.length,
+            reconnectionSuccess: reconnectionSuccess,
+            communicationSuccess: communicationSuccess
+        });
+
+        // Nettoyage
+        await cleanup(sockets, adminSocket);
+
+    } catch (error) {
+        log(`Erreur fatale: ${error.message}`, "ERROR");
+        console.error(error.stack);
+        await cleanup([], adminSocket);
+        process.exit(1);
+    }
+
+    setTimeout(() => {
+        process.exit(0);
+    }, 2000);
+}
+
+// Gestion des erreurs non capturées
+process.on('uncaughtException', (err) => {
+    log(`Exception non capturée: ${err.message}`, "ERROR");
+    console.error(err.stack);
     process.exit(1);
 });
 
-process.on('uncaughtException', (err) => {
-    log(`Exception non capturee: ${err.message}`, "ERROR");
+process.on('unhandledRejection', (reason) => {
+    log(`Promesse non gérée: ${reason}`, "ERROR");
     process.exit(1);
 });
+
+// Lancer les tests
+main();

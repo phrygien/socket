@@ -12,68 +12,32 @@
 const socketMeta                              = require('../store');
 const { log }                                 = require('../utils/logger');
 const { getAdminOfRoom, broadcastUserList }   = require('../services/roomService');
-const fs                                      = require('fs');
-const path                                    = require('path');
-
-// ── Chemin vers l'historique ──────────────────────────────────────────────────
-const HISTORIQUE_PATH = path.resolve(__dirname, '../historique.json');
-
-/**
- * Charge l'historique depuis le fichier JSON.
- * Retourne un tableau vide si le fichier n'existe pas ou est corrompu.
- */
-function loadHistorique() {
-  try {
-    if (!fs.existsSync(HISTORIQUE_PATH)) return [];
-    const raw = fs.readFileSync(HISTORIQUE_PATH, 'utf8');
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Ajoute une entrée à historique.json (écriture atomique).
- * @param {object} entry
- */
-function appendHistorique(entry) {
-  try {
-    const data = loadHistorique();
-    data.push(entry);
-    fs.writeFileSync(HISTORIQUE_PATH, JSON.stringify(data, null, 2), 'utf8');
-  } catch (err) {
-    log(`  [historique] ERREUR écriture : ${err.message}`);
-  }
-}
-
-/**
- * Récupère l'IP réelle du socket.
- * Prend en compte les proxies via x-forwarded-for.
- * @param {object} socket
- * @returns {string}
- */
-function getClientIp(socket) {
-  const forwarded = socket.handshake.headers['x-forwarded-for'];
-  if (forwarded) {
-    // x-forwarded-for peut contenir plusieurs IPs séparées par une virgule
-    // La première est l'IP du client d'origine
-    return forwarded.split(',')[0].trim();
-  }
-  return socket.handshake.address || 'inconnue';
-}
 
 // ── Listes de contrôle ────────────────────────────────────────────────────────
 
+/**
+ * Tous les types qu'un socket peut diffuser via getMsgRoom.
+ * Tout type absent est bloqué, même s'il existe côté client.
+ */
 const ALLOWED_TYPES = new Set([
-  'listLot',
-  'numLot',
-  'previousLot',
-  'message',
-  'users',
-  'closeEnchere',
-  'updateLot',
+  'listLot',      // liste complète des lots (admin → salle)
+  'numLot',       // changement de lot en cours (admin → screen.php)
+  'previousLot',  // lot précédent avec prix adjugé (admin → screen.php)
+  'message',      // message texte libre (admin → follow.php)
+  'users',        // liste HTML des bidders connectés (admin → follow.php)
+  'closeEnchere', // clôture d'une enchère (admin → results.php)
+  'updateLot',    // mise à jour d'un lot (admin → results.php)
 ]);
 
+/**
+ * Types réservés à l'admin.
+ * Un bidder ou un visiteur qui émet l'un de ces types est bloqué,
+ * même s'il a rejoint la salle correctement.
+ *
+ * listLot est intentionnellement ici : sans ce contrôle, un bidder
+ *     pourrait broadcaster une liste falsifiée (faux prix, faux statuts)
+ *     visible par tous les participants de la salle.
+ */
 const ADMIN_ONLY_TYPES = new Set([
   'listLot',
   'numLot',
@@ -86,15 +50,19 @@ const ADMIN_ONLY_TYPES = new Set([
 
 function registerRoomHandler(io, socket) {
 
+  /**
+   * Rejoindre une salle.
+   * room = "auctav<saleId>"  ex: "auctav42"
+   */
   socket.on('joinroom', (room) => {
 
+    // ── Contrôle : room doit être une string non vide ─────────────────────
     if (typeof room !== 'string' || !room.trim()) {
       log(`  [joinroom] REFUSÉ room invalide – socket=${socket.id}`);
       return;
     }
 
-    const meta   = socketMeta.get(socket.id);
-    const clientIp = getClientIp(socket);
+    const meta = socketMeta.get(socket.id);
 
     // Quitter l'ancienne salle si nécessaire
     if (meta?.room) {
@@ -106,23 +74,13 @@ function registerRoomHandler(io, socket) {
     socket.join(room);
     if (meta) meta.room = room;
 
-    // ── Affichage IP dans les logs ─────────────────────────────────────────
-    log(`  [joinroom] socket=${socket.id} → room="${room}" ip=${clientIp} admin=${meta?.isAdmin}`);
-
-    // ── Sauvegarde dans historique.json ────────────────────────────────────
-    appendHistorique({
-      event     : 'joinroom',
-      socketId  : socket.id,
-      ip        : clientIp,
-      room      : room,
-      pseudo    : meta?.pseudo || 'inconnu',
-      isAdmin   : meta?.isAdmin ?? false,
-      timestamp : new Date().toISOString(),
-    });
+    log(`  [joinroom] : ${socket.id} → ${room} (admin=${meta?.isAdmin})`);
 
     if (meta?.isAdmin) {
+      // Admin rejoint → tous les bidders peuvent maintenant enchérir
       broadcastUserList(io, room);
     } else {
+      // Bidder/visiteur rejoint → lui envoyer en privé l'admin actuel
       const adminId = getAdminOfRoom(room);
       socket.emit('userList', { admin: adminId });
       log(`  [userList→${socket.id}] admin=${adminId || 'none'}`);
@@ -131,8 +89,23 @@ function registerRoomHandler(io, socket) {
 
   // ───────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Diffusion d'un message vers toute la salle.
+   *
+   * data = { room, type, msg, name }
+   *
+   * Types émis par l'admin (switcher.php) via getMsgRoom :
+   *   listLot      → liste des lots de la vente
+   *   numLot       → changement de lot en cours    (→ screen.php)
+   *   previousLot  → lot précédent avec prix adjugé (→ screen.php)
+   *   message      → message texte libre            (→ follow.php)
+   *   users        → liste HTML des bidders         (→ follow.php)
+   *   closeEnchere → clôture d'une enchère          (→ results.php)
+   *   updateLot    → mise à jour d'un lot           (→ results.php)
+   */
   socket.on('getMsgRoom', (data) => {
 
+    // ── Contrôle 1 : présence et format des champs obligatoires ──────────
     if (!data || typeof data.room !== 'string' || !data.room.trim()) {
       log(`  [getMsgRoom] REFUSÉ champ room absent/invalide – socket=${socket.id}`);
       return;
@@ -142,31 +115,40 @@ function registerRoomHandler(io, socket) {
       return;
     }
 
+    // ── Contrôle 2 : le socket doit appartenir à la salle déclarée ───────
+    // Empêche un attaquant de forger data.room pour cibler une autre vente.
     if (!socket.rooms.has(data.room)) {
       log(`  [getMsgRoom] REFUSÉ – ${socket.id} n'appartient pas à la salle "${data.room}"`);
       return;
     }
 
+    // ── Contrôle 3 : type dans la liste blanche ───────────────────────────
+    // Bloque tout type inconnu ou inventé côté client.
     if (!ALLOWED_TYPES.has(data.type)) {
       log(`  [getMsgRoom] REFUSÉ – type non autorisé "${data.type}" depuis ${socket.id}`);
       return;
     }
 
+    // ── Contrôle 4 : types sensibles réservés à l'admin ──────────────────
+    // Un bidder ou un visiteur ne peut jamais émettre listLot, numLot,
+    // closeEnchere, etc., même s'il est membre de la salle.
     const meta = socketMeta.get(socket.id);
     if (ADMIN_ONLY_TYPES.has(data.type) && !meta?.isAdmin) {
       log(`  [getMsgRoom] REFUSÉ – type admin "${data.type}" émis par un non-admin ${socket.id}`);
       return;
     }
 
+    // ── Payload nettoyé — from toujours issu du serveur, jamais du client ─
     const payload = {
       type : data.type,
       msg  : data.msg  || {},
       name : data.name || meta?.pseudo || 'unknown',
-      from : socket.id,
+      from : socket.id,   // identité réelle, non spoofable
     };
 
     log(`  [room→${data.room}] type="${data.type}" from=${socket.id} (admin=${meta?.isAdmin})`);
 
+    // Diffuse à TOUS les membres de la salle, y compris l'émetteur
     io.to(data.room).emit('sendMsg', payload);
   });
 }

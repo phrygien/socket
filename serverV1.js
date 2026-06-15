@@ -4,19 +4,19 @@
  */
 
 const express = require('express');
-const http    = require('http');
+const http = require('http');
 const { Server } = require('socket.io');
 
 const { PORT } = require('./config');
 const socketMeta = require('./store');
-const { log }    = require('./utils/logger');
+const { log } = require('./utils/logger');
 
 const { getRoomStats } = require('./services/roomService');
 
-const { registerAdminHandler }      = require('./handlers/adminHandler');
-const { registerBidderHandler }     = require('./handlers/bidderHandler');
-const { registerRoomHandler }       = require('./handlers/roomHandler');
-const { registerMessageHandler }    = require('./handlers/messageHandler');
+const { registerAdminHandler } = require('./handlers/adminHandler');
+const { registerBidderHandler } = require('./handlers/bidderHandler');
+const { registerRoomHandler } = require('./handlers/roomHandler');
+const { registerMessageHandler } = require('./handlers/messageHandler');
 const { registerDisconnectHandler } = require('./handlers/disconnectHandler');
 
 const {
@@ -33,7 +33,7 @@ const {
 // EXPRESS
 // ─────────────────────────────────────────────────────────────
 
-const app    = express();
+const app = express();
 const server = http.createServer(app);
 
 app.use(express.json());
@@ -56,27 +56,26 @@ const ALLOWED_ORIGINS = [
 
 app.get('/', (_req, res) => {
   res.json({
-    status  : 'ok',
-    uptime  : process.uptime(),
-    rooms   : getRoomStats(),
-    memory  : process.memoryUsage(),
-    sockets : socketMeta.size          // taille du store visible
+    status: 'ok',
+    uptime: process.uptime(),
+    rooms: getRoomStats(),
+    memory: process.memoryUsage()
   });
 });
 
 // Followers debug
 app.get('/follow/:room', (req, res) => {
   res.json({
-    room      : req.params.room,
-    followers : getFollowersInRoom(req.params.room)
+    room: req.params.room,
+    followers: getFollowersInRoom(req.params.room)
   });
 });
 
 // Screens debug
 app.get('/screen/:room', (req, res) => {
   res.json({
-    room    : req.params.room,
-    screens : getScreensInRoom(req.params.room)
+    room: req.params.room,
+    screens: getScreensInRoom(req.params.room)
   });
 });
 
@@ -86,28 +85,30 @@ app.get('/screen/:room', (req, res) => {
 
 const io = new Server(server, {
 
-  // MOBILE / RÉSEAUX LENTS
-  pingInterval : 10000,   // était 25000
-  pingTimeout  : 20000,   // était 60000 — réduit les zombies-sockets
+  // IMPORTANT MOBILE / RESEAUX LENTS
+  pingInterval: 25000,
+  pingTimeout: 60000,
 
-  // GROS PAYLOADS
-  maxHttpBufferSize : 1e7, // 10Mo — suffisant sauf transfert de fichiers
+  // IMPORTANT GROS PAYLOADS
+  maxHttpBufferSize: 1e8,
 
-  // Compression — seuil relevé pour éviter de compresser les petits messages
+  // Compression
   perMessageDeflate: {
-    threshold: 8192        // était 1024
+    threshold: 1024
   },
 
   // Compatibilité anciens clients
   allowEIO3: true,
 
-  // polling + websocket — polling aide sur réseaux mobiles lents
+  // IMPORTANT:
+  // polling + websocket
+  // polling aide énormément réseaux mobile
   transports: ['polling', 'websocket'],
 
   cors: {
-    origin: function (origin, callback) {
+    origin: function(origin, callback) {
 
-      // Autorise requêtes sans origin
+      // autorise requêtes sans origin
       // apps mobiles / curl / server-to-server
       if (!origin) {
         return callback(null, true);
@@ -122,38 +123,9 @@ const io = new Server(server, {
       return callback(new Error('CORS blocked'));
     },
 
-    methods      : ['GET', 'POST'],
-    credentials  : true
+    methods: ['GET', 'POST'],
+    credentials: true
   }
-});
-
-// ─────────────────────────────────────────────────────────────
-// RATE LIMITING PAR IP
-// ─────────────────────────────────────────────────────────────
-
-const connPerIP = new Map();
-const MAX_CONN  = 5; // max 5 sockets simultanés par IP
-
-io.use((socket, next) => {
-
-  const ip = socket.handshake.headers['x-forwarded-for']
-      || socket.handshake.address;
-
-  const count = connPerIP.get(ip) || 0;
-
-  if (count >= MAX_CONN) {
-    log(`[RATE LIMIT] IP bloquée : ${ip} (${count} connexions)`);
-    return next(new Error('Too many connections'));
-  }
-
-  connPerIP.set(ip, count + 1);
-
-  socket.on('disconnect', () => {
-    const n = (connPerIP.get(ip) || 1) - 1;
-    n <= 0 ? connPerIP.delete(ip) : connPerIP.set(ip, n);
-  });
-
-  next();
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -165,9 +137,9 @@ io.on('connection', (socket) => {
   log(`+ Connexion : ${socket.id}`);
 
   socketMeta.set(socket.id, {
-    pseudo  : 'unknown',
-    room    : null,
-    isAdmin : false
+    pseudo: 'unknown',
+    room: null,
+    isAdmin: false
   });
 
   // ───────────────────────────────────────────────────
@@ -177,7 +149,9 @@ io.on('connection', (socket) => {
   log(`Transport : ${socket.conn.transport.name}`);
 
   socket.conn.on('upgrade', () => {
-    log(`[UPGRADE] ${socket.id} -> ${socket.conn.transport.name}`);
+    log(
+        `[UPGRADE] ${socket.id} -> ${socket.conn.transport.name}`
+    );
   });
 
   // ───────────────────────────────────────────────────
@@ -210,8 +184,11 @@ io.on('connection', (socket) => {
 // ─────────────────────────────────────────────────────────────
 
 server.listen(PORT, () => {
+
   log(`Socket.IO server démarré sur port ${PORT}`);
+
   log(`Mode : PRODUCTION`);
+
   log(`Health : http://localhost:${PORT}/`);
 });
 
@@ -220,23 +197,19 @@ server.listen(PORT, () => {
 // ─────────────────────────────────────────────────────────────
 
 process.on('SIGTERM', () => {
+
   log('SIGTERM reçu — arrêt propre');
-  server.close(() => process.exit(0));
+
+  server.close(() => {
+    process.exit(0);
+  });
 });
 
 process.on('SIGINT', () => {
+
   log('SIGINT reçu — arrêt propre');
-  server.close(() => process.exit(0));
-});
 
-// ─────────────────────────────────────────────────────────────
-// PROTECTION GLOBALE CONTRE LES CRASHS
-// ─────────────────────────────────────────────────────────────
-
-process.on('uncaughtException', (err) => {
-  log(`[FATAL] uncaughtException: ${err.message}`);
-});
-
-process.on('unhandledRejection', (reason) => {
-  log(`[FATAL] unhandledRejection: ${reason}`);
+  server.close(() => {
+    process.exit(0);
+  });
 });

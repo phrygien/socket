@@ -60,7 +60,7 @@ app.get('/', (_req, res) => {
     uptime  : process.uptime(),
     rooms   : getRoomStats(),
     memory  : process.memoryUsage(),
-    sockets : socketMeta.size          // taille du store visible
+    sockets : socketMeta.size
   });
 });
 

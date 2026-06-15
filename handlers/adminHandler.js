@@ -21,6 +21,19 @@ function registerAdminHandler(io, socket) {
     // Si l'admin était déjà dans une salle (reconnexion rapide), notifier
     if (meta?.room) broadcastUserList(io, meta.room);
   });
+
+  socket.on('admin:kick', ({ socketId }) => {
+    // Vérifier que c'est bien un admin qui demande
+    const meta = socketMeta.get(socket.id);
+    if (!meta?.isAdmin) return;
+
+    const target = io.sockets.sockets.get(socketId);
+    if (target) {
+      target.emit('kicked');   // prévient le client
+      target.disconnect(true); // déconnecte
+      log(`[ADMIN KICK] ${socketId} éjecté par ${socket.id}`);
+    }
+  });
 }
 
 module.exports = { registerAdminHandler };

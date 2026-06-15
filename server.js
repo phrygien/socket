@@ -47,7 +47,8 @@ const ALLOWED_ORIGINS = [
   'https://auctav.com',
   'https://dev.astucom.com',
   'http://localhost',
-  'http://127.0.0.1'
+  'http://127.0.0.1',
+    null
 ];
 
 // ─────────────────────────────────────────────────────────────
@@ -106,6 +107,11 @@ const io = new Server(server, {
 
   cors: {
     origin: function (origin, callback) {
+
+      // null = fichier local file://
+      if (!origin || origin === 'null' || ALLOWED_ORIGINS.includes(origin)) {
+        return callback(null, true);
+      }
 
       // Autorise requêtes sans origin
       // apps mobiles / curl / server-to-server

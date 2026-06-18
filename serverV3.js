@@ -12,12 +12,10 @@ const socketMeta = require("./store");
 const { log } = require("./utils/logger");
 
 const { getRoomStats } = require("./services/roomService");
+
 const { registerAdminHandler } = require("./handlers/adminHandler");
 const { registerBidderHandler } = require("./handlers/bidderHandler");
-const {
-  registerRoomHandler,
-  joinroomThrottle,
-} = require("./handlers/roomHandler");
+const { registerRoomHandler } = require("./handlers/roomHandler");
 const { registerMessageHandler } = require("./handlers/messageHandler");
 const { registerDisconnectHandler } = require("./handlers/disconnectHandler");
 
@@ -60,11 +58,13 @@ app.get("/", (_req, res) => {
   res.json({
     status: "ok",
     uptime: process.uptime(),
+    //rooms   : getRoomStats(),
     memory: process.memoryUsage(),
     sockets: socketMeta.size,
   });
 });
 
+// Followers debug
 app.get("/follow/:room", (req, res) => {
   res.json({
     room: req.params.room,
@@ -72,6 +72,7 @@ app.get("/follow/:room", (req, res) => {
   });
 });
 
+// Screens debug
 app.get("/screen/:room", (req, res) => {
   res.json({
     room: req.params.room,
@@ -85,14 +86,16 @@ app.get("/screen/:room", (req, res) => {
 
 const io = new Server(server, {
   // MOBILE / RÉSEAUX LENTS
-  pingInterval: 10000,
-  pingTimeout: 20000,
+  pingInterval: 10000, // était 25000
+  pingTimeout: 20000, // était 60000 — réduit les zombies-sockets
 
-  // GROS PAYLOADS — plafond global côté transport (avant parsing applicatif)
-  maxHttpBufferSize: 1e7, // 10 Mo
+  // GROS PAYLOADS
+  maxHttpBufferSize: 1e7, // 10Mo — suffisant sauf transfert de fichiers
 
   // Compression — seuil relevé pour éviter de compresser les petits messages
-  perMessageDeflate: { threshold: 8192 },
+  perMessageDeflate: {
+    threshold: 8192, // était 1024
+  },
 
   // Compatibilité anciens clients
   allowEIO3: true,
@@ -101,19 +104,29 @@ const io = new Server(server, {
   transports: ["polling", "websocket"],
 
   cors: {
-    origin(origin, callback) {
-      if (!origin) return callback(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    origin: function (origin, callback) {
+      // Autorise requêtes sans origin
+      // apps mobiles / curl / server-to-server
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      if (ALLOWED_ORIGINS.includes(origin)) {
+        return callback(null, true);
+      }
+
       log(`CORS bloqué : ${origin}`);
+
       return callback(new Error("CORS blocked"));
     },
+
     methods: ["GET", "POST"],
     credentials: true,
   },
 });
 
 // ─────────────────────────────────────────────────────────────
-// MIDDLEWARE 1 — RATE-LIMIT PAR IP
+// RATE LIMITING PAR IP
 // ─────────────────────────────────────────────────────────────
 
 const connPerIP = new Map();
@@ -122,10 +135,11 @@ const MAX_CONN = 5; // max 5 sockets simultanés par IP
 io.use((socket, next) => {
   const ip =
     socket.handshake.headers["x-forwarded-for"] || socket.handshake.address;
+
   const count = connPerIP.get(ip) || 0;
 
   if (count >= MAX_CONN) {
-    log(`[RATE LIMIT IP] bloqué : ${ip} (${count} connexions actives)`);
+    log(`[RATE LIMIT] IP bloquée : ${ip} (${count} connexions)`);
     return next(new Error("Too many connections"));
   }
 
@@ -140,39 +154,8 @@ io.use((socket, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// MIDDLEWARE 2 — RATE-LIMIT PAR SOCKET (anti-flood d'événements)
-// ─────────────────────────────────────────────────────────────
-
-const EVENT_WINDOW_MS = 1000; // fenêtre glissante d'1 seconde
-const MAX_EVENTS_PER_S = 10; // max 10 événements/s avant déconnexion
-
-io.use((socket, next) => {
-  let count = 0;
-  let resetAt = Date.now() + EVENT_WINDOW_MS;
-
-  socket.onAny((eventName) => {
-    const now = Date.now();
-    if (now > resetAt) {
-      count = 0;
-      resetAt = now + EVENT_WINDOW_MS;
-    }
-    count++;
-    if (count > MAX_EVENTS_PER_S) {
-      log(
-        `[FLOOD] socket=${socket.id} event="${eventName}" (${count}/s) → déconnecté`,
-      );
-      socket.disconnect(true);
-    }
-  });
-
-  next();
-});
-
-// ─────────────────────────────────────────────────────────────
 // SOCKET CONNECTION
 // ─────────────────────────────────────────────────────────────
-
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes sans activité → zombie
 
 io.on("connection", (socket) => {
   log(`+ Connexion : ${socket.id}`);
@@ -183,45 +166,32 @@ io.on("connection", (socket) => {
     isAdmin: false,
   });
 
-  // ── Debug transport ────────────────────────────────────────
+  // ───────────────────────────────────────────────────
+  // DEBUG TRANSPORT
+  // ───────────────────────────────────────────────────
+
   log(`Transport : ${socket.conn.transport.name}`);
+
   socket.conn.on("upgrade", () => {
-    log(`[UPGRADE] ${socket.id} → ${socket.conn.transport.name}`);
+    log(`[UPGRADE] ${socket.id} -> ${socket.conn.transport.name}`);
   });
 
-  // ─────────────────────────────────────────────────────────
-  // IDLE TIMEOUT — déconnecte les zombies inactifs
-  // ─────────────────────────────────────────────────────────
+  // ───────────────────────────────────────────────────
+  // DEBUG DISCONNECT
+  // ───────────────────────────────────────────────────
 
-  let idleTimer = null;
-
-  function resetIdle() {
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      log(
-        `[IDLE] socket=${socket.id} inactif depuis ${IDLE_TIMEOUT_MS / 1000}s → déconnecté`,
-      );
-      socket.disconnect(true);
-    }, IDLE_TIMEOUT_MS);
-  }
-
-  resetIdle(); // démarre dès la connexion
-
-  // Réinitialise le timer à chaque événement entrant (ping inclus)
-  socket.onAny(() => resetIdle());
-
-  // ── Debug disconnect ───────────────────────────────────────
   socket.on("disconnect", (reason) => {
-    clearTimeout(idleTimer);
-    joinroomThrottle.delete(socket.id); // nettoyage throttle joinroom
-    log(`- Déconnexion : ${socket.id} (${reason})`);
+    log(`- Déconnexion: ${socket.id} (${reason})`);
   });
 
   socket.on("connect_error", (err) => {
     log(`Connect error ${socket.id}: ${err.message}`);
   });
 
-  // ── Handlers métier ────────────────────────────────────────
+  // ───────────────────────────────────────────────────
+  // HANDLERS
+  // ───────────────────────────────────────────────────
+
   registerAdminHandler(io, socket);
   registerBidderHandler(io, socket);
   registerRoomHandler(io, socket);
@@ -259,9 +229,10 @@ process.on("SIGINT", () => {
 // PROTECTION GLOBALE CONTRE LES CRASHS
 // ─────────────────────────────────────────────────────────────
 
-process.on("uncaughtException", (err) =>
-  log(`[FATAL] uncaughtException: ${err.message}`),
-);
-process.on("unhandledRejection", (reason) =>
-  log(`[FATAL] unhandledRejection: ${reason}`),
-);
+process.on("uncaughtException", (err) => {
+  log(`[FATAL] uncaughtException: ${err.message}`);
+});
+
+process.on("unhandledRejection", (reason) => {
+  log(`[FATAL] unhandledRejection: ${reason}`);
+});

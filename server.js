@@ -61,7 +61,6 @@ app.get("/", (_req, res) => {
     //rooms   : getRoomStats(),
     memory: process.memoryUsage(),
     sockets: socketMeta.size,
-    connPerIP: connPerIP.size, // utile pour monitorer les IPs actives
   });
 });
 
@@ -87,28 +86,27 @@ app.get("/screen/:room", (req, res) => {
 
 const io = new Server(server, {
   // MOBILE / RÉSEAUX LENTS
-  pingInterval: 10000,
-  pingTimeout: 20000,
-
-  // Timeout handshake — coupe les connexions qui traînent
-  connectTimeout: 10000,
+  pingInterval: 10000, // était 25000
+  pingTimeout: 20000, // était 60000 — réduit les zombies-sockets
 
   // GROS PAYLOADS
-  maxHttpBufferSize: 1e7, // 10Mo
+  maxHttpBufferSize: 1e7, // 10Mo — suffisant sauf transfert de fichiers
 
   // Compression — seuil relevé pour éviter de compresser les petits messages
   perMessageDeflate: {
-    threshold: 8192,
+    threshold: 8192, // était 1024
   },
 
   // Compatibilité anciens clients
   allowEIO3: true,
 
-  // polling + websocket
+  // polling + websocket — polling aide sur réseaux mobiles lents
   transports: ["polling", "websocket"],
 
   cors: {
     origin: function (origin, callback) {
+      // Autorise requêtes sans origin
+      // apps mobiles / curl / server-to-server
       if (!origin) {
         return callback(null, true);
       }
@@ -132,21 +130,7 @@ const io = new Server(server, {
 // ─────────────────────────────────────────────────────────────
 
 const connPerIP = new Map();
-const MAX_CONN = 5;
-
-// Nettoyage périodique — évite la fuite mémoire sur sockets zombies
-setInterval(() => {
-  let cleaned = 0;
-  for (const [ip, count] of connPerIP.entries()) {
-    if (count <= 0) {
-      connPerIP.delete(ip);
-      cleaned++;
-    }
-  }
-  if (cleaned > 0) {
-    log(`[RATE LIMIT] Nettoyage : ${cleaned} entrées supprimées`);
-  }
-}, 60_000);
+const MAX_CONN = 5; // max 5 sockets simultanés par IP
 
 io.use((socket, next) => {
   const ip =
@@ -243,17 +227,12 @@ process.on("SIGINT", () => {
 
 // ─────────────────────────────────────────────────────────────
 // PROTECTION GLOBALE CONTRE LES CRASHS
-// Ajout de process.exit(1) — laisse PM2 redémarrer proprement
-// plutôt que continuer dans un état corrompu
 // ─────────────────────────────────────────────────────────────
 
 process.on("uncaughtException", (err) => {
   log(`[FATAL] uncaughtException: ${err.message}`);
-  log(err.stack || "");
-  process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
   log(`[FATAL] unhandledRejection: ${reason}`);
-  process.exit(1);
 });

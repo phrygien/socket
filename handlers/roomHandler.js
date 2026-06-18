@@ -5,10 +5,8 @@
 //  2. Le socket doit appartenir à data.room (anti-room-forgery)
 //  3. Liste blanche des types autorisés (ALLOWED_TYPES)
 //  4. Types sensibles réservés à l'admin (ADMIN_ONLY_TYPES)
-//  5. listLot inclus dans ADMIN_ONLY_TYPES
-//  6. Anti-flood joinroom (throttle 2 s par socket)
-//  7. Max 1 salle active par socket (pas de multi-room)
-//  8. Cap taille payload getMsgRoom (50 Ko)
+//  5. listLot inclus dans ADMIN_ONLY_TYPES (un bidder ne peut pas
+//     broadcaster une fausse liste de lots à toute la salle)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const socketMeta = require("../store");
@@ -22,14 +20,6 @@ const path = require("path");
 
 // ── Chemin vers l'historique ──────────────────────────────────────────────────
 const HISTORIQUE_PATH = path.resolve(__dirname, "../historique.json");
-
-// ── Throttle joinroom (partagé avec server.js pour le nettoyage disconnect) ───
-// Map socketId → timestamp de la dernière tentative joinroom
-const joinroomThrottle = new Map();
-const JOINROOM_THROTTLE_MS = 2000; // 1 joinroom max toutes les 2 secondes
-
-// ── Cap taille payload ────────────────────────────────────────────────────────
-const MAX_PAYLOAD_BYTES = 50_000; // 50 Ko max par événement getMsgRoom
 
 // ── Listes de contrôle ────────────────────────────────────────────────────────
 
@@ -62,6 +52,10 @@ const ADMIN_ONLY_TYPES = new Set([
 
 // ── Utilitaires historique ────────────────────────────────────────────────────
 
+/**
+ * Charge l'historique depuis le fichier JSON.
+ * Retourne un tableau vide si le fichier n'existe pas ou est corrompu.
+ */
 function loadHistorique() {
   try {
     if (!fs.existsSync(HISTORIQUE_PATH)) return [];
@@ -72,6 +66,10 @@ function loadHistorique() {
   }
 }
 
+/**
+ * Ajoute une entrée à historique.json.
+ * @param {object} entry
+ */
 function appendHistorique(entry) {
   try {
     const data = loadHistorique();
@@ -82,15 +80,24 @@ function appendHistorique(entry) {
   }
 }
 
+/**
+ * Met à jour le pseudo dans historique.json pour le socketId donné.
+ * Cherche la dernière entrée joinroom de ce socket et y injecte le pseudo.
+ * @param {string} socketId
+ * @param {string} pseudo
+ */
 function updateHistoriquePseudo(socketId, pseudo) {
   try {
     const data = loadHistorique();
+
+    // Parcourt depuis la fin pour trouver la dernière entrée joinroom du socket
     for (let i = data.length - 1; i >= 0; i--) {
       if (data[i].socketId === socketId && data[i].event === "joinroom") {
         data[i].pseudo = pseudo;
         break;
       }
     }
+
     fs.writeFileSync(HISTORIQUE_PATH, JSON.stringify(data, null, 2), "utf8");
     log(
       `  [historique] pseudo mis à jour → socketId=${socketId} pseudo="${pseudo}"`,
@@ -101,135 +108,113 @@ function updateHistoriquePseudo(socketId, pseudo) {
 }
 
 /**
- * Récupère l'IP réelle du socket (prend en compte les proxies).
+ * Récupère l'IP réelle du socket.
+ * Prend en compte les proxies via x-forwarded-for.
+ * @param {object} socket
+ * @returns {string}
  */
 function getClientIp(socket) {
   const forwarded = socket.handshake.headers["x-forwarded-for"];
-  if (forwarded) return forwarded.split(",")[0].trim();
+  if (forwarded) {
+    // x-forwarded-for peut contenir plusieurs IPs séparées par une virgule
+    // La première est l'IP du client d'origine
+    return forwarded.split(",")[0].trim();
+  }
   return socket.handshake.address || "inconnue";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 function registerRoomHandler(io, socket) {
-  // ───────────────────────────────────────────────────────────────────────────
   /**
    * Rejoindre une salle.
    * room = "auctav<saleId>"  ex: "auctav42"
-   *
-   * Protections :
-   *   - throttle : 1 joinroom max toutes les 2 secondes
-   *   - format   : string non vide, pattern auctav + chiffres
-   *   - max      : 1 seule salle active par socket
    */
   socket.on("joinroom", (room) => {
-    // ── Contrôle 1 : throttle joinroom ───────────────────────────────────────
-    const now = Date.now();
-    const last = joinroomThrottle.get(socket.id) || 0;
-
-    if (now - last < JOINROOM_THROTTLE_MS) {
-      log(
-        `  [joinroom] THROTTLE – socket=${socket.id} (${now - last}ms depuis dernier joinroom)`,
-      );
-      return;
-    }
-    joinroomThrottle.set(socket.id, now);
-
-    // ── Contrôle 2 : format room ──────────────────────────────────────────────
+    // ── Contrôle : room doit être une string non vide ─────────────────────
     if (typeof room !== "string" || !room.trim()) {
-      log(`  [joinroom] REFUSÉ room invalide (type) – socket=${socket.id}`);
+      log(`  [joinroom] REFUSÉ room invalide – socket=${socket.id}`);
       return;
     }
 
-    const roomTrimmed = room.trim();
-
-    // Pattern attendu : "auctav" suivi d'un ou plusieurs chiffres
-    if (!/^auctav\d+$/.test(roomTrimmed)) {
-      log(
-        `  [joinroom] REFUSÉ room invalide (pattern) "${roomTrimmed}" – socket=${socket.id}`,
-      );
-      return;
-    }
-
-    // ── Contrôle 3 : max 1 salle active par socket ───────────────────────────
     const meta = socketMeta.get(socket.id);
     const clientIp = getClientIp(socket);
-
-    if (meta?.room && meta.room === roomTrimmed) {
-      // Déjà dans cette salle → silencieux, pas de double jointure
-      log(
-        `  [joinroom] IGNORÉ – socket=${socket.id} déjà dans "${roomTrimmed}"`,
-      );
-      return;
-    }
 
     // Quitter l'ancienne salle si nécessaire
     if (meta?.room) {
       const oldRoom = meta.room;
       socket.leave(oldRoom);
-      log(`  [joinroom] quitte "${oldRoom}" → rejoint "${roomTrimmed}"`);
       if (meta.isAdmin) broadcastUserList(io, oldRoom);
     }
 
-    socket.join(roomTrimmed);
-    if (meta) meta.room = roomTrimmed;
+    socket.join(room);
+    if (meta) meta.room = room;
 
+    // ── Affichage IP dans les logs ─────────────────────────────────────────
     log(
-      `  [joinroom] socket=${socket.id} → room="${roomTrimmed}" ip=${clientIp} admin=${meta?.isAdmin}`,
+      `  [joinroom] socket=${socket.id} → room="${room}" ip=${clientIp} admin=${meta?.isAdmin}`,
     );
 
-    // ── Sauvegarde historique ─────────────────────────────────────────────────
+    // ── Sauvegarde dans historique.json (pseudo = inconnu pour l'instant) ─
+    // Il sera mis à jour dès réception de l'événement 'username'
     appendHistorique({
       event: "joinroom",
       socketId: socket.id,
       ip: clientIp,
-      room: roomTrimmed,
+      room: room,
       pseudo: meta?.pseudo || "inconnu",
       isAdmin: meta?.isAdmin ?? false,
       timestamp: new Date().toISOString(),
     });
 
     if (meta?.isAdmin) {
-      broadcastUserList(io, roomTrimmed);
+      // Admin rejoint → tous les bidders peuvent maintenant enchérir
+      broadcastUserList(io, room);
     } else {
-      const adminId = getAdminOfRoom(roomTrimmed);
+      // Bidder/visiteur rejoint → lui envoyer en privé l'admin actuel
+      const adminId = getAdminOfRoom(room);
       socket.emit("userList", { admin: adminId });
       log(`  [userList→${socket.id}] admin=${adminId || "none"}`);
     }
   });
 
   // ───────────────────────────────────────────────────────────────────────────
+
   /**
    * Réception du pseudo du client.
+   * Arrive juste après joinroom côté client (socket.emit('username', pseudo)).
+   * On met à jour socketMeta ET l'entrée historique correspondante.
    */
   socket.on("username", (pseudo) => {
     if (typeof pseudo !== "string" || !pseudo.trim()) return;
 
-    // Limite la longueur du pseudo (anti-abus)
-    const safePseudo = pseudo.trim().slice(0, 64);
-
     const meta = socketMeta.get(socket.id);
-    if (meta) meta.pseudo = safePseudo;
+    if (meta) meta.pseudo = pseudo.trim();
 
-    log(`  [username] socket=${socket.id} pseudo="${safePseudo}"`);
-    updateHistoriquePseudo(socket.id, safePseudo);
+    log(`  [username] socket=${socket.id} pseudo="${pseudo.trim()}"`);
+
+    // Mise à jour de l'entrée joinroom dans historique.json
+    updateHistoriquePseudo(socket.id, pseudo.trim());
   });
 
   // ───────────────────────────────────────────────────────────────────────────
+
   /**
    * Diffusion d'un message vers toute la salle.
    *
    * data = { room, type, msg, name }
    *
-   * Protections :
-   *   - champs obligatoires présents et valides
-   *   - le socket appartient bien à la salle déclarée
-   *   - type dans liste blanche
-   *   - types sensibles réservés admin
-   *   - taille du payload plafonnée à 50 Ko
+   * Types émis par l'admin (switcher.php) via getMsgRoom :
+   *   listLot      → liste des lots de la vente
+   *   numLot       → changement de lot en cours    (→ screen.php)
+   *   previousLot  → lot précédent avec prix adjugé (→ screen.php)
+   *   message      → message texte libre            (→ follow.php)
+   *   users        → liste HTML des bidders         (→ follow.php)
+   *   closeEnchere → clôture d'une enchère          (→ results.php)
+   *   updateLot    → mise à jour d'un lot           (→ results.php)
    */
   socket.on("getMsgRoom", (data) => {
-    // ── Contrôle 1 : présence et format des champs obligatoires ──────────────
+    // ── Contrôle 1 : présence et format des champs obligatoires ──────────
     if (!data || typeof data.room !== "string" || !data.room.trim()) {
       log(
         `  [getMsgRoom] REFUSÉ champ room absent/invalide – socket=${socket.id}`,
@@ -243,23 +228,7 @@ function registerRoomHandler(io, socket) {
       return;
     }
 
-    // ── Contrôle 2 : taille du payload ───────────────────────────────────────
-    try {
-      const payloadSize = JSON.stringify(data).length;
-      if (payloadSize > MAX_PAYLOAD_BYTES) {
-        log(
-          `  [getMsgRoom] REFUSÉ payload trop grand (${payloadSize} bytes) – socket=${socket.id}`,
-        );
-        return;
-      }
-    } catch {
-      log(
-        `  [getMsgRoom] REFUSÉ payload non sérialisable – socket=${socket.id}`,
-      );
-      return;
-    }
-
-    // ── Contrôle 3 : le socket doit appartenir à la salle déclarée ───────────
+    // ── Contrôle 2 : le socket doit appartenir à la salle déclarée ───────
     if (!socket.rooms.has(data.room)) {
       log(
         `  [getMsgRoom] REFUSÉ – ${socket.id} n'appartient pas à la salle "${data.room}"`,
@@ -267,7 +236,7 @@ function registerRoomHandler(io, socket) {
       return;
     }
 
-    // ── Contrôle 4 : type dans liste blanche ──────────────────────────────────
+    // ── Contrôle 3 : type dans la liste blanche ───────────────────────────
     if (!ALLOWED_TYPES.has(data.type)) {
       log(
         `  [getMsgRoom] REFUSÉ – type non autorisé "${data.type}" depuis ${socket.id}`,
@@ -275,7 +244,7 @@ function registerRoomHandler(io, socket) {
       return;
     }
 
-    // ── Contrôle 5 : types sensibles réservés à l'admin ──────────────────────
+    // ── Contrôle 4 : types sensibles réservés à l'admin ──────────────────
     const meta = socketMeta.get(socket.id);
     if (ADMIN_ONLY_TYPES.has(data.type) && !meta?.isAdmin) {
       log(
@@ -284,7 +253,7 @@ function registerRoomHandler(io, socket) {
       return;
     }
 
-    // ── Payload nettoyé ───────────────────────────────────────────────────────
+    // ── Payload nettoyé ───────────────────────────────────────────────────
     const payload = {
       type: data.type,
       msg: data.msg || {},
@@ -296,8 +265,9 @@ function registerRoomHandler(io, socket) {
       `  [room→${data.room}] type="${data.type}" from=${socket.id} (admin=${meta?.isAdmin})`,
     );
 
+    // Diffuse à TOUS les membres de la salle, y compris l'émetteur
     io.to(data.room).emit("sendMsg", payload);
   });
 }
 
-module.exports = { registerRoomHandler, joinroomThrottle };
+module.exports = { registerRoomHandler };

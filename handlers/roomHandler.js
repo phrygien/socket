@@ -10,13 +10,6 @@
 //  2. Le socket doit appartenir à data.room (anti-room-forgery)
 //  3. Liste blanche des types autorisés (ALLOWED_TYPES)
 //  4. Types sensibles réservés à l'admin (ADMIN_ONLY_TYPES)
-//
-//  Correctif ajouté :
-//  5. Anti double-admin : quand un socket admin rejoint une room qui a
-//     déjà un admin actif (ancien socket pas encore timeout après une
-//     déconnexion/reconnexion), l'ancien socket est expulsé immédiatement
-//     au lieu d'attendre le pingTimeout (20s). Évite que deux sockets
-//     admin émettent/reçoivent en parallèle sur la même room.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const socketMeta = require("../store");
@@ -154,38 +147,6 @@ function getClientIp(socket) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ANTI DOUBLE-ADMIN
-//
-// Quand un socket admin rejoint une room, vérifie si un autre socket est
-// déjà enregistré comme admin de cette room. Si oui, on le considère comme
-// obsolète (ancienne connexion suite à reconnexion/changement réseau) et on
-// le déconnecte immédiatement, ce qui déclenche son propre 'disconnect'
-// (→ disconnectHandler fait le ménage : socketMeta.delete + broadcastUserList).
-//
-// Si le socket n'existe plus côté transport (fantôme déjà fermé mais pas
-// encore nettoyé du store), on supprime directement son entrée socketMeta.
-// ─────────────────────────────────────────────────────────────────────────────
-
-function evictStaleAdmin(io, room, incomingSocketId) {
-  const existingAdminId = getAdminOfRoom(room);
-  if (!existingAdminId || existingAdminId === incomingSocketId) return;
-
-  const oldSocket = io.sockets.sockets.get(existingAdminId);
-
-  if (oldSocket) {
-    log(
-      `  [ADMIN REPLACE] ancien admin=${existingAdminId} expulsé de room="${room}" (remplacé par ${incomingSocketId})`,
-    );
-    oldSocket.disconnect(true); // ferme proprement → déclenche disconnectHandler
-  } else {
-    log(
-      `  [ADMIN REPLACE] ancien admin=${existingAdminId} déjà fantôme, nettoyage direct du store`,
-    );
-    socketMeta.delete(existingAdminId);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 function registerRoomHandler(io, socket) {
   /**
@@ -204,11 +165,6 @@ function registerRoomHandler(io, socket) {
     if (meta?.room) {
       socket.leave(meta.room);
       if (meta.isAdmin) broadcastUserList(io, meta.room);
-    }
-
-    // ── Anti double-admin : expulser tout admin précédent sur cette room ──
-    if (meta?.isAdmin) {
-      evictStaleAdmin(io, room, socket.id);
     }
 
     socket.join(room);

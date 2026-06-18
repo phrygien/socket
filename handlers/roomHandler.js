@@ -1,12 +1,15 @@
 // ─── Room Handler ─────────────────────────────────────────────────────────────
 //
-//  Sécurité appliquée :
+//  Optimisations latence :
+//  1. Écriture historique asynchrone + buffer (ne bloque plus la event loop)
+//  2. socketMeta accès optimisé (une seule récupération par event)
+//  3. Payload nettoyé en amont
+//
+//  Sécurité conservée :
 //  1. Validation des entrées (room, type)
 //  2. Le socket doit appartenir à data.room (anti-room-forgery)
 //  3. Liste blanche des types autorisés (ALLOWED_TYPES)
 //  4. Types sensibles réservés à l'admin (ADMIN_ONLY_TYPES)
-//  5. listLot inclus dans ADMIN_ONLY_TYPES (un bidder ne peut pas
-//     broadcaster une fausse liste de lots à toute la salle)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const socketMeta = require("../store");
@@ -23,25 +26,16 @@ const HISTORIQUE_PATH = path.resolve(__dirname, "../historique.json");
 
 // ── Listes de contrôle ────────────────────────────────────────────────────────
 
-/**
- * Tous les types qu'un socket peut diffuser via getMsgRoom.
- * Tout type absent est bloqué, même s'il existe côté client.
- */
 const ALLOWED_TYPES = new Set([
-  "listLot", // liste complète des lots (admin → salle)
-  "numLot", // changement de lot en cours (admin → screen.php)
-  "previousLot", // lot précédent avec prix adjugé (admin → screen.php)
-  "message", // message texte libre (admin → follow.php)
-  "users", // liste HTML des bidders connectés (admin → follow.php)
-  "closeEnchere", // clôture d'une enchère (admin → results.php)
-  "updateLot", // mise à jour d'un lot (admin → results.php)
+  "listLot",
+  "numLot",
+  "previousLot",
+  "message",
+  "users",
+  "closeEnchere",
+  "updateLot",
 ]);
 
-/**
- * Types réservés à l'admin.
- * Un bidder ou un visiteur qui émet l'un de ces types est bloqué,
- * même s'il a rejoint la salle correctement.
- */
 const ADMIN_ONLY_TYPES = new Set([
   "listLot",
   "numLot",
@@ -50,76 +44,105 @@ const ADMIN_ONLY_TYPES = new Set([
   "updateLot",
 ]);
 
-// ── Utilitaires historique ────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// HISTORIQUE — ÉCRITURE ASYNCHRONE BUFFERISÉE
+//
+// Problème précédent : fs.readFileSync + fs.writeFileSync dans chaque event
+// bloquaient la boucle événementielle Node.js → latence visible pendant la vente.
+//
+// Solution : buffer en mémoire (tableau) + flush async toutes les 5 secondes.
+// Zéro impact sur le hot path Socket.IO.
+// ─────────────────────────────────────────────────────────────────────────────
+
+let historiqueBuffer = [];
+let flushScheduled = false;
 
 /**
- * Charge l'historique depuis le fichier JSON.
- * Retourne un tableau vide si le fichier n'existe pas ou est corrompu.
- */
-function loadHistorique() {
-  try {
-    if (!fs.existsSync(HISTORIQUE_PATH)) return [];
-    const raw = fs.readFileSync(HISTORIQUE_PATH, "utf8");
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Ajoute une entrée à historique.json.
+ * Ajoute une entrée dans le buffer — ne touche pas le disque.
  * @param {object} entry
  */
 function appendHistorique(entry) {
-  try {
-    const data = loadHistorique();
-    data.push(entry);
-    fs.writeFileSync(HISTORIQUE_PATH, JSON.stringify(data, null, 2), "utf8");
-  } catch (err) {
-    log(`  [historique] ERREUR écriture : ${err.message}`);
-  }
+  historiqueBuffer.push(entry);
+  scheduleFlush();
 }
 
 /**
- * Met à jour le pseudo dans historique.json pour le socketId donné.
- * Cherche la dernière entrée joinroom de ce socket et y injecte le pseudo.
+ * Planifie un flush différé si pas déjà prévu.
+ */
+function scheduleFlush() {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  setTimeout(flushHistorique, 5000);
+}
+
+/**
+ * Écrit le buffer sur disque de façon asynchrone (fs.appendFile).
+ * Utilise appendFile ligne par ligne (NDJSON) — pas de lecture/parse du fichier entier.
+ */
+function flushHistorique() {
+  flushScheduled = false;
+
+  if (historiqueBuffer.length === 0) return;
+
+  const toWrite = historiqueBuffer.splice(0); // vide le buffer atomiquement
+  const lines = toWrite.map((e) => JSON.stringify(e)).join("\n") + "\n";
+
+  fs.appendFile(HISTORIQUE_PATH, lines, "utf8", (err) => {
+    if (err) log(`[historique] ERREUR flush : ${err.message}`);
+  });
+}
+
+/**
+ * Flush final au shutdown propre — évite de perdre les dernières entrées.
+ */
+function flushHistoriqueSync() {
+  if (historiqueBuffer.length === 0) return;
+  const toWrite = historiqueBuffer.splice(0);
+  const lines = toWrite.map((e) => JSON.stringify(e)).join("\n") + "\n";
+  try {
+    fs.appendFileSync(HISTORIQUE_PATH, lines, "utf8");
+  } catch (err) {
+    log(`[historique] ERREUR flush sync : ${err.message}`);
+  }
+}
+
+// Branché sur SIGTERM/SIGINT dans server.js — appeler flushHistoriqueSync() avant process.exit
+process.on("SIGTERM", flushHistoriqueSync);
+process.on("SIGINT", flushHistoriqueSync);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTE : updateHistoriquePseudo supprimé
+//
+// L'ancienne version faisait readFileSync → parse → find → writeFileSync
+// pour mettre à jour le pseudo — opération coûteuse bloquante.
+//
+// Désormais le pseudo est inclus directement dans l'entrée joinroom
+// via socketMeta (mis à jour dès 'username'), ou mis à jour dans le buffer
+// en mémoire avant le flush.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Met à jour le pseudo dans le buffer en mémoire (pas de I/O).
  * @param {string} socketId
  * @param {string} pseudo
  */
-function updateHistoriquePseudo(socketId, pseudo) {
-  try {
-    const data = loadHistorique();
-
-    // Parcourt depuis la fin pour trouver la dernière entrée joinroom du socket
-    for (let i = data.length - 1; i >= 0; i--) {
-      if (data[i].socketId === socketId && data[i].event === "joinroom") {
-        data[i].pseudo = pseudo;
-        break;
-      }
+function updateBufferPseudo(socketId, pseudo) {
+  for (let i = historiqueBuffer.length - 1; i >= 0; i--) {
+    if (
+      historiqueBuffer[i].socketId === socketId &&
+      historiqueBuffer[i].event === "joinroom"
+    ) {
+      historiqueBuffer[i].pseudo = pseudo;
+      break;
     }
-
-    fs.writeFileSync(HISTORIQUE_PATH, JSON.stringify(data, null, 2), "utf8");
-    log(
-      `  [historique] pseudo mis à jour → socketId=${socketId} pseudo="${pseudo}"`,
-    );
-  } catch (err) {
-    log(`  [historique] ERREUR mise à jour pseudo : ${err.message}`);
   }
 }
 
-/**
- * Récupère l'IP réelle du socket.
- * Prend en compte les proxies via x-forwarded-for.
- * @param {object} socket
- * @returns {string}
- */
+// ── Utilitaire IP ─────────────────────────────────────────────────────────────
+
 function getClientIp(socket) {
   const forwarded = socket.handshake.headers["x-forwarded-for"];
-  if (forwarded) {
-    // x-forwarded-for peut contenir plusieurs IPs séparées par une virgule
-    // La première est l'IP du client d'origine
-    return forwarded.split(",")[0].trim();
-  }
+  if (forwarded) return forwarded.split(",")[0].trim();
   return socket.handshake.address || "inconnue";
 }
 
@@ -128,10 +151,8 @@ function getClientIp(socket) {
 function registerRoomHandler(io, socket) {
   /**
    * Rejoindre une salle.
-   * room = "auctav<saleId>"  ex: "auctav42"
    */
   socket.on("joinroom", (room) => {
-    // ── Contrôle : room doit être une string non vide ─────────────────────
     if (typeof room !== "string" || !room.trim()) {
       log(`  [joinroom] REFUSÉ room invalide – socket=${socket.id}`);
       return;
@@ -140,38 +161,33 @@ function registerRoomHandler(io, socket) {
     const meta = socketMeta.get(socket.id);
     const clientIp = getClientIp(socket);
 
-    // Quitter l'ancienne salle si nécessaire
+    // Quitter l'ancienne salle
     if (meta?.room) {
-      const oldRoom = meta.room;
-      socket.leave(oldRoom);
-      if (meta.isAdmin) broadcastUserList(io, oldRoom);
+      socket.leave(meta.room);
+      if (meta.isAdmin) broadcastUserList(io, meta.room);
     }
 
     socket.join(room);
     if (meta) meta.room = room;
 
-    // ── Affichage IP dans les logs ─────────────────────────────────────────
     log(
       `  [joinroom] socket=${socket.id} → room="${room}" ip=${clientIp} admin=${meta?.isAdmin}`,
     );
 
-    // ── Sauvegarde dans historique.json (pseudo = inconnu pour l'instant) ─
-    // Il sera mis à jour dès réception de l'événement 'username'
+    // Historique — asynchrone, ne bloque pas
     appendHistorique({
       event: "joinroom",
       socketId: socket.id,
       ip: clientIp,
-      room: room,
+      room,
       pseudo: meta?.pseudo || "inconnu",
       isAdmin: meta?.isAdmin ?? false,
       timestamp: new Date().toISOString(),
     });
 
     if (meta?.isAdmin) {
-      // Admin rejoint → tous les bidders peuvent maintenant enchérir
       broadcastUserList(io, room);
     } else {
-      // Bidder/visiteur rejoint → lui envoyer en privé l'admin actuel
       const adminId = getAdminOfRoom(room);
       socket.emit("userList", { admin: adminId });
       log(`  [userList→${socket.id}] admin=${adminId || "none"}`);
@@ -180,41 +196,23 @@ function registerRoomHandler(io, socket) {
 
   // ───────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Réception du pseudo du client.
-   * Arrive juste après joinroom côté client (socket.emit('username', pseudo)).
-   * On met à jour socketMeta ET l'entrée historique correspondante.
-   */
   socket.on("username", (pseudo) => {
     if (typeof pseudo !== "string" || !pseudo.trim()) return;
 
+    const trimmed = pseudo.trim();
     const meta = socketMeta.get(socket.id);
-    if (meta) meta.pseudo = pseudo.trim();
+    if (meta) meta.pseudo = trimmed;
 
-    log(`  [username] socket=${socket.id} pseudo="${pseudo.trim()}"`);
+    log(`  [username] socket=${socket.id} pseudo="${trimmed}"`);
 
-    // Mise à jour de l'entrée joinroom dans historique.json
-    updateHistoriquePseudo(socket.id, pseudo.trim());
+    // Mise à jour en mémoire uniquement — zéro I/O
+    updateBufferPseudo(socket.id, trimmed);
   });
 
   // ───────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Diffusion d'un message vers toute la salle.
-   *
-   * data = { room, type, msg, name }
-   *
-   * Types émis par l'admin (switcher.php) via getMsgRoom :
-   *   listLot      → liste des lots de la vente
-   *   numLot       → changement de lot en cours    (→ screen.php)
-   *   previousLot  → lot précédent avec prix adjugé (→ screen.php)
-   *   message      → message texte libre            (→ follow.php)
-   *   users        → liste HTML des bidders         (→ follow.php)
-   *   closeEnchere → clôture d'une enchère          (→ results.php)
-   *   updateLot    → mise à jour d'un lot           (→ results.php)
-   */
   socket.on("getMsgRoom", (data) => {
-    // ── Contrôle 1 : présence et format des champs obligatoires ──────────
+    // Contrôle 1 : champs obligatoires
     if (!data || typeof data.room !== "string" || !data.room.trim()) {
       log(
         `  [getMsgRoom] REFUSÉ champ room absent/invalide – socket=${socket.id}`,
@@ -228,15 +226,15 @@ function registerRoomHandler(io, socket) {
       return;
     }
 
-    // ── Contrôle 2 : le socket doit appartenir à la salle déclarée ───────
+    // Contrôle 2 : appartenance à la salle
     if (!socket.rooms.has(data.room)) {
       log(
-        `  [getMsgRoom] REFUSÉ – ${socket.id} n'appartient pas à la salle "${data.room}"`,
+        `  [getMsgRoom] REFUSÉ – ${socket.id} n'appartient pas à "${data.room}"`,
       );
       return;
     }
 
-    // ── Contrôle 3 : type dans la liste blanche ───────────────────────────
+    // Contrôle 3 : type dans la liste blanche
     if (!ALLOWED_TYPES.has(data.type)) {
       log(
         `  [getMsgRoom] REFUSÉ – type non autorisé "${data.type}" depuis ${socket.id}`,
@@ -244,16 +242,15 @@ function registerRoomHandler(io, socket) {
       return;
     }
 
-    // ── Contrôle 4 : types sensibles réservés à l'admin ──────────────────
+    // Contrôle 4 : types admin uniquement
     const meta = socketMeta.get(socket.id);
     if (ADMIN_ONLY_TYPES.has(data.type) && !meta?.isAdmin) {
       log(
-        `  [getMsgRoom] REFUSÉ – type admin "${data.type}" émis par un non-admin ${socket.id}`,
+        `  [getMsgRoom] REFUSÉ – type admin "${data.type}" émis par non-admin ${socket.id}`,
       );
       return;
     }
 
-    // ── Payload nettoyé ───────────────────────────────────────────────────
     const payload = {
       type: data.type,
       msg: data.msg || {},
@@ -265,9 +262,9 @@ function registerRoomHandler(io, socket) {
       `  [room→${data.room}] type="${data.type}" from=${socket.id} (admin=${meta?.isAdmin})`,
     );
 
-    // Diffuse à TOUS les membres de la salle, y compris l'émetteur
+    // Diffuse à toute la salle — hot path, aucun I/O
     io.to(data.room).emit("sendMsg", payload);
   });
 }
 
-module.exports = { registerRoomHandler };
+module.exports = { registerRoomHandler, flushHistoriqueSync };

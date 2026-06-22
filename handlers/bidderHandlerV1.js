@@ -1,24 +1,25 @@
-const socketMeta = require("../store");
-const { log } = require("../utils/logger");
-const { getAdminOfRoom } = require("../services/roomService");
-const { updateSaleEndTimer } = require("../services/saleEndService");
+const socketMeta                = require('../store');
+const { log }                   = require('../utils/logger');
+const { getAdminOfRoom }        = require('../services/roomService');
+const { updateSaleEndTimer }    = require('../services/saleEndService');
 
 function registerBidderHandler(io, socket) {
+
   /**
    * Identification du bidder.
    * socket.emit('username', pseudo)
    * Répond immédiatement avec l'ID de l'admin de la salle.
    */
-  socket.on("username", (pseudo) => {
+  socket.on('username', (pseudo) => {
     const meta = socketMeta.get(socket.id);
-    if (meta) meta.pseudo = pseudo || "Bidder";
+    if (meta) meta.pseudo = pseudo || 'Bidder';
     log(`  [username] : ${socket.id} → "${pseudo}"`);
 
     const room = meta?.room;
     if (room) {
       const adminId = getAdminOfRoom(room);
-      socket.emit("userList", { admin: adminId });
-      log(`  [userList→${socket.id}] admin=${adminId || "none"}`);
+      socket.emit('userList', { admin: adminId });
+      log(`  [userList→${socket.id}] admin=${adminId || 'none'}`);
     }
   });
 
@@ -26,11 +27,11 @@ function registerBidderHandler(io, socket) {
    * Connexion initiale du bidder.
    * socket.emit('connected', { name, email, room })
    */
-  socket.on("connected", (data) => {
+  socket.on('connected', (data) => {
     const meta = socketMeta.get(socket.id);
     if (meta && data) {
-      meta.pseudo = data.name || meta.pseudo;
-      meta.email = data.email || "";
+      meta.pseudo = data.name  || meta.pseudo;
+      meta.email  = data.email || '';
       if (data.room) {
         socket.join(data.room);
         meta.room = data.room;
@@ -40,15 +41,13 @@ function registerBidderHandler(io, socket) {
     const room = meta?.room;
     if (!room) return;
 
-    log(
-      `  [connected]: ${socket.id} "${data?.name}" (${data?.email}) → ${room}`,
-    );
+    log(`  [connected]: ${socket.id} "${data?.name}" (${data?.email}) → ${room}`);
 
-    io.to(room).emit("sendMsg", {
-      type: "connected",
-      msg: data || {},
-      name: meta?.pseudo || "unknown",
-      from: socket.id,
+    io.to(room).emit('sendMsg', {
+      type : 'connected',
+      msg  : data || {},
+      name : meta?.pseudo || 'unknown',
+      from : socket.id
     });
   });
 
@@ -56,11 +55,11 @@ function registerBidderHandler(io, socket) {
    * Reconnexion d'un bidder (changement de device / rechargement).
    * socket.emit('reconnection', { name, email, room })
    */
-  socket.on("reconnection", (data) => {
+  socket.on('reconnection', (data) => {
     const meta = socketMeta.get(socket.id);
     if (meta && data) {
-      meta.pseudo = data.name || meta.pseudo;
-      meta.email = data.email || "";
+      meta.pseudo = data.name  || meta.pseudo;
+      meta.email  = data.email || '';
       if (data.room) {
         socket.join(data.room);
         meta.room = data.room;
@@ -70,15 +69,13 @@ function registerBidderHandler(io, socket) {
     const room = meta?.room;
     if (!room) return;
 
-    log(
-      `  [reconnect]: ${socket.id} "${data?.name}" (${data?.email}) → ${room}`,
-    );
+    log(`  [reconnect]: ${socket.id} "${data?.name}" (${data?.email}) → ${room}`);
 
-    io.to(room).emit("sendMsg", {
-      type: "reconnection",
-      msg: data || {},
-      name: meta?.pseudo || "unknown",
-      from: socket.id,
+    io.to(room).emit('sendMsg', {
+      type : 'reconnection',
+      msg  : data || {},
+      name : meta?.pseudo || 'unknown',
+      from : socket.id
     });
   });
 
@@ -87,17 +84,17 @@ function registerBidderHandler(io, socket) {
    * Émis par vente_list.php  : socket.emit('getEncheresList', { room })
    * Émis par switcher_list.php côté bidder : type reçu 'getEncheres'
    */
-  socket.on("getEncheresList", (data) => {
+  socket.on('getEncheresList', (data) => {
     const room = socketMeta.get(socket.id)?.room || data?.room;
     if (!room) return;
 
     log(`  [getList]  : ${socket.id} → ${room}`);
 
-    io.to(room).emit("sendMsg", {
-      type: "getEncheresList",
-      msg: data || {},
-      name: socketMeta.get(socket.id)?.pseudo || "unknown",
-      from: socket.id,
+    io.to(room).emit('sendMsg', {
+      type : 'getEncheresList',
+      msg  : data || {},
+      name : socketMeta.get(socket.id)?.pseudo || 'unknown',
+      from : socket.id
     });
   });
 
@@ -106,17 +103,17 @@ function registerBidderHandler(io, socket) {
    * L'admin (switcher_list.php) reçoit ce sendMsg et répond
    * en privé avec getMsgPrivate({ type: 'numLot', … }).
    */
-  socket.on("getEncheres", (data) => {
+  socket.on('getEncheres', (data) => {
     const room = socketMeta.get(socket.id)?.room || data?.room;
     if (!room) return;
 
     log(`  [getEnch]  : ${socket.id} → ${room}`);
 
-    io.to(room).emit("sendMsg", {
-      type: "getEncheres",
-      msg: data || {},
-      name: socketMeta.get(socket.id)?.pseudo || "unknown",
-      from: socket.id,
+    io.to(room).emit('sendMsg', {
+      type : 'getEncheres',
+      msg  : data || {},
+      name : socketMeta.get(socket.id)?.pseudo || 'unknown',
+      from : socket.id
     });
   });
 
@@ -124,20 +121,18 @@ function registerBidderHandler(io, socket) {
    * Enchère placée par un bidder.
    * socket.emit('doEncheres', { lot, myEnchere, room })
    */
-  socket.on("doEncheres", (data) => {
+  socket.on('doEncheres', (data) => {
     const meta = socketMeta.get(socket.id);
     const room = meta?.room || data?.room;
     if (!room) return;
 
-    log(
-      `  [enchère]  : ${socket.id} lot=${data?.lot} montant=${data?.myEnchere}`,
-    );
+    log(`  [enchère]  : ${socket.id} lot=${data?.lot} montant=${data?.myEnchere}`);
 
-    io.to(room).emit("sendMsg", {
-      type: "doEncheres",
-      msg: data || {},
-      name: meta?.pseudo || "unknown",
-      from: socket.id,
+    io.to(room).emit('sendMsg', {
+      type : 'doEncheres',
+      msg  : data || {},
+      name : meta?.pseudo || 'unknown',
+      from : socket.id
     });
   });
 
@@ -145,16 +140,16 @@ function registerBidderHandler(io, socket) {
    * Vérification de présence (heartbeat).
    * socket.emit('follow', data)
    */
-  socket.on("follow", (data) => {
+  socket.on('follow', (data) => {
     const meta = socketMeta.get(socket.id);
     const room = meta?.room;
     if (!room) return;
 
-    io.to(room).emit("sendMsg", {
-      type: "follow",
-      msg: data || {},
-      name: meta?.pseudo || "unknown",
-      from: socket.id,
+    io.to(room).emit('sendMsg', {
+      type : 'follow',
+      msg  : data || {},
+      name : meta?.pseudo || 'unknown',
+      from : socket.id
     });
   });
 
@@ -172,30 +167,28 @@ function registerBidderHandler(io, socket) {
    * C'est ici que transitent les numLot et listLot envoyés par l'admin
    * → on en profite pour mettre à jour le timer de fin de vente.
    */
-  socket.on("getMsgPrivate", (data) => {
+  socket.on('getMsgPrivate', (data) => {
     if (!data) return;
 
     const { toid, type, msg, name } = data;
     const meta = socketMeta.get(socket.id);
     const room = meta?.room;
 
-    log(`  [getMsgPrv]: from=${socket.id} to=${toid || "room"} type=${type}`);
+    log(`  [getMsgPrv]: from=${socket.id} to=${toid || 'room'} type=${type}`);
 
     // ── Mise à jour timer de fin de vente ──────────────────────────────────
 
     // Cas 1 : un seul lot mis à jour (ex: l'admin ouvre/met à jour un lot)
-    if (type === "numLot" && msg?.time > 0 && room) {
-      log(
-        `  [saleEnd]  : numLot lot=${msg.numLot} time=${msg.time}s room=${room}`,
-      );
+    if (type === 'numLot' && msg?.time > 0 && room) {
+      log(`  [saleEnd]  : numLot lot=${msg.numLot} time=${msg.time}s room=${room}`);
       updateSaleEndTimer(io, room, msg.time);
     }
 
     // Cas 2 : liste complète des lots envoyée à un bidder qui reconnecte
     // msg.list est un tableau de lots, chacun avec un champ time
-    if (type === "listLot" && Array.isArray(msg?.list) && room) {
+    if (type === 'listLot' && Array.isArray(msg?.list) && room) {
       const maxTime = msg.list.reduce((max, lot) => {
-        return lot?.time > max ? lot.time : max;
+        return (lot?.time > max) ? lot.time : max;
       }, 0);
 
       if (maxTime > 0) {
@@ -204,49 +197,26 @@ function registerBidderHandler(io, socket) {
       }
     }
 
-    // ── FIX : confirmEnchere — s'assurer que price est transmis au bidder ──
-    //
-    // L'admin envoie confirmEnchere via getMsgPrivate vers le socket du bidder.
-    // Si le payload msg contient myEnchere (le montant validé) mais pas price,
-    // on le mappe ici pour que le client puisse mettre à jour son affichage
-    // sans attendre le broadcast numLot suivant.
-    //
-    // Structure attendue côté admin :
-    //   getMsgPrivate({ toid: bidderSocketId, type: 'confirmEnchere',
-    //                   msg: { lot, state, price, manuel } })
-    //
-    // Si price est absent mais myEnchere est présent (ancien format admin),
-    // on le copie dans price pour assurer la compatibilité ascendante.
-    if (type === "confirmEnchere" && msg) {
-      if (msg.price === undefined && msg.myEnchere !== undefined) {
-        msg.price = msg.myEnchere;
-        log(
-          `  [confirmEnchere] price absent → copié depuis myEnchere=${msg.price} lot=${msg.lot}`,
-        );
-      }
-    }
-    // ──────────────────────────────────────────────────────────────────────
-
     // ── Routage du message ─────────────────────────────────────────────────
 
     // Destinataire précis → message privé
     if (toid) {
-      io.to(toid).emit("sendMsg", {
+      io.to(toid).emit('sendMsg', {
         type,
-        msg: msg || {},
-        name: name || meta?.pseudo || "unknown",
-        from: socket.id,
+        msg  : msg  || {},
+        name : name || meta?.pseudo || 'unknown',
+        from : socket.id
       });
       return;
     }
 
     // Pas de destinataire → broadcast à toute la salle
     if (room) {
-      io.to(room).emit("sendMsg", {
+      io.to(room).emit('sendMsg', {
         type,
-        msg: msg || {},
-        name: name || meta?.pseudo || "unknown",
-        from: socket.id,
+        msg  : msg  || {},
+        name : name || meta?.pseudo || 'unknown',
+        from : socket.id
       });
     }
   });
